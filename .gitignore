@@ -1,0 +1,12 @@
+node_modules/
+out/
+*.vsix
+.vscode-test/
+.vscode/
+.codex/
+*.logcat
+*.log
+*.trace
+*.dmp
+.env
+.env.*

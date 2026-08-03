@@ -1,0 +1,151 @@
+{
+  "name": "logcat-source-navigator",
+  "displayName": "Logcat Source Navigator",
+  "description": "Map Android logcat rows to Log, Slog, and ALOG source locations.",
+  "version": "0.1.3",
+  "publisher": "local",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yoonswonjoon/logcat-source-navigator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yoonswonjoon/logcat-source-navigator/issues"
+  },
+  "homepage": "https://github.com/yoonswonjoon/logcat-source-navigator#readme",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "android",
+    "aosp",
+    "logcat",
+    "logging"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onView:logcatSourceNavigator.logView",
+    "onCommand:logcatSourceNavigator.focus",
+    "onCommand:logcatSourceNavigator.indexSources",
+    "onCommand:logcatSourceNavigator.loadLogcat",
+    "onCommand:logcatSourceNavigator.clearSession",
+    "onCommand:logcatSourceNavigator.nextMappedLog",
+    "onCommand:logcatSourceNavigator.previousMappedLog"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "logcatSourceNavigator.focus",
+        "title": "Open Logcat Source",
+        "category": "Logcat Source"
+      },
+      {
+        "command": "logcatSourceNavigator.indexSources",
+        "title": "Index Source Folder",
+        "category": "Logcat Source"
+      },
+      {
+        "command": "logcatSourceNavigator.loadLogcat",
+        "title": "Load Logcat File",
+        "category": "Logcat Source"
+      },
+      {
+        "command": "logcatSourceNavigator.clearSession",
+        "title": "Clear Loaded Logcat",
+        "category": "Logcat Source"
+      },
+      {
+        "command": "logcatSourceNavigator.nextMappedLog",
+        "title": "Next Mapped Log",
+        "category": "Logcat Source"
+      },
+      {
+        "command": "logcatSourceNavigator.previousMappedLog",
+        "title": "Previous Mapped Log",
+        "category": "Logcat Source"
+      }
+    ],
+    "viewsContainers": {
+      "panel": [
+        {
+          "id": "logcatSourceNavigator",
+          "title": "Logcat Source",
+          "icon": "media/logcat.svg"
+        }
+      ]
+    },
+    "views": {
+      "logcatSourceNavigator": [
+        {
+          "type": "webview",
+          "id": "logcatSourceNavigator.logView",
+          "name": "Logcat Source",
+          "icon": "media/logcat.svg",
+          "visibility": "visible"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "logcatSourceNavigator.loadLogcat",
+          "when": "view == logcatSourceNavigator.logView",
+          "group": "navigation@1"
+        },
+        {
+          "command": "logcatSourceNavigator.indexSources",
+          "when": "view == logcatSourceNavigator.logView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "logcatSourceNavigator.clearSession",
+          "when": "view == logcatSourceNavigator.logView",
+          "group": "navigation@3"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Logcat Source Navigator",
+      "properties": {
+        "logcatSourceNavigator.exclude": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            ".git",
+            ".repo",
+            "node_modules",
+            "out",
+            "build",
+            ".gradle",
+            ".idea"
+          ],
+          "description": "Directory names excluded while indexing source logs."
+        },
+        "logcatSourceNavigator.maxFileSizeKb": {
+          "type": "number",
+          "default": 2048,
+          "minimum": 64,
+          "description": "Skip source files larger than this limit during indexing."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node --test out/test/logcatParser.test.js out/test/sourceIndexer.test.js out/test/matcher.test.js",
+    "package": "npx vsce package --allow-missing-repository"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/vscode": "^1.96.0",
+    "@vscode/vsce": "^3.2.1",
+    "typescript": "^5.7.2"
+  }
+}

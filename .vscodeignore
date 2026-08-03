@@ -1,0 +1,16 @@
+.vscode/**
+.codex/**
+src/**
+node_modules/**
+*.vsix
+tsconfig.json
+.gitignore
+.vscodeignore
+out/**/*.map
+out/test/**
+*.logcat
+*.log
+*.trace
+*.dmp
+.env
+.env.*
