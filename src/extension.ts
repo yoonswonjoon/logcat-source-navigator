@@ -4,7 +4,7 @@ import { SourceIndexStore } from './core/indexStore';
 import { availablePids, availableTids, parseLogcat } from './core/logcatParser';
 import { filterMappedEvents, isAutomaticallyNavigable, LogFilter, matchLogcatEvents } from './core/matcher';
 import { buildSourceIndex } from './core/sourceIndexer';
-import { LogcatEvent, MappedLogEvent, MatchCandidate, SourceIndex } from './core/types';
+import { CustomLoggerDefinition, LogcatEvent, MappedLogEvent, MatchCandidate, SourceIndex } from './core/types';
 import {
   LogcatSourceViewProvider,
   PanelFilters,
@@ -21,6 +21,31 @@ function normalizeIdFilter(value: unknown): number[] | undefined {
   return [...new Set(value.filter((id): id is number => typeof id === 'number' && Number.isInteger(id) && id >= 0))].sort(
     (left, right) => left - right
   );
+}
+
+function normalizeCustomLoggers(value: unknown): CustomLoggerDefinition[] {
+  if (!Array.isArray(value)) return [];
+
+  const normalized: CustomLoggerDefinition[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue;
+    const definition = entry as Record<string, unknown>;
+    const receiver = typeof definition.receiver === 'string' ? definition.receiver.trim() : '';
+    if (!receiver) continue;
+
+    const tagArgumentIndex = definition.tagArgumentIndex;
+    const messageArgumentIndex = definition.messageArgumentIndex;
+    normalized.push({
+      receiver,
+      ...(typeof tagArgumentIndex === 'number' && Number.isInteger(tagArgumentIndex) && tagArgumentIndex >= 0
+        ? { tagArgumentIndex }
+        : {}),
+      ...(typeof messageArgumentIndex === 'number' && Number.isInteger(messageArgumentIndex) && messageArgumentIndex >= 0
+        ? { messageArgumentIndex }
+        : {})
+    });
+  }
+  return normalized;
 }
 
 class LogcatSourceController implements vscode.Disposable {
@@ -85,6 +110,7 @@ class LogcatSourceController implements vscode.Disposable {
     const config = vscode.workspace.getConfiguration('logcatSourceNavigator');
     const excludeDirectoryNames = config.get<string[]>('exclude', []);
     const maxFileSizeKb = config.get<number>('maxFileSizeKb', 2048);
+    const customLoggers = normalizeCustomLoggers(config.get<unknown>('customLoggers', []));
     this.notice = `Indexing ${root.fsPath}...`;
     this.postState();
 
@@ -100,7 +126,8 @@ class LogcatSourceController implements vscode.Disposable {
             [root.fsPath],
             {
               excludeDirectoryNames,
-              maxFileSizeBytes: maxFileSizeKb * 1024
+              maxFileSizeBytes: maxFileSizeKb * 1024,
+              customLoggers
             },
             (scannedFiles, indexedSites, currentPath) => {
               if (scannedFiles % 25 === 0) {
@@ -114,7 +141,7 @@ class LogcatSourceController implements vscode.Disposable {
           )
       );
       await this.store.save(this.sourceIndex);
-      this.notice = `Indexed ${this.sourceIndex.sites.length} source logs from ${path.basename(root.fsPath)}.`;
+      this.notice = `Indexed ${this.sourceIndex.sites.length} source logs from ${path.basename(root.fsPath)}${customLoggers.length ? ` with ${customLoggers.length} custom logger definition${customLoggers.length === 1 ? '' : 's'}` : ''}.`;
       this.refreshMappings();
       void vscode.window.showInformationMessage(this.notice);
     } catch (error) {
@@ -130,18 +157,50 @@ class LogcatSourceController implements vscode.Disposable {
       canSelectFolders: false,
       canSelectMany: false,
       filters: {
-        'Logcat files': ['log', 'logcat', 'txt', 'json'],
+        'Logcat and text files': ['log', 'logcat', 'txt', 'json'],
         'All files': ['*']
       },
       openLabel: 'Load logcat'
     });
     const file = selection?.[0];
     if (!file) return;
+
+    await this.loadLogcatUri(file);
+  }
+
+  /**
+   * Handles the native picker as well as a file URI received from a webview
+   * drop.  The latter is important on VS Code/Electron builds that expose an
+   * external drag as `text/uri-list` instead of a browser File object.
+   */
+  async loadLogcatUri(uri: vscode.Uri): Promise<void> {
+    const name = path.basename(uri.fsPath || uri.path) || 'logcat';
+    this.notice = `Loading ${name}...`;
+    this.postState();
     try {
-      const bytes = await vscode.workspace.fs.readFile(file);
-      this.loadLogcatText(path.basename(file.fsPath || file.path), Buffer.from(bytes).toString('utf8'));
+      const bytes = await vscode.workspace.fs.readFile(uri);
+      this.loadLogcatText(name, Buffer.from(bytes).toString('utf8'));
     } catch (error) {
-      void vscode.window.showErrorMessage(`Unable to load logcat: ${error instanceof Error ? error.message : String(error)}`);
+      this.notice = `Unable to load ${name}: ${error instanceof Error ? error.message : String(error)}`;
+      this.postState();
+      void vscode.window.showErrorMessage(this.notice);
+    }
+  }
+
+  async loadLogcatUriString(uriText: string): Promise<void> {
+    if (typeof uriText !== 'string' || !uriText.trim()) {
+      void vscode.window.showErrorMessage('Unable to load dropped logcat: no file URI was provided.');
+      return;
+    }
+
+    try {
+      const uri = vscode.Uri.parse(uriText.trim(), true);
+      if (uri.scheme !== 'file' && uri.scheme !== 'vscode-remote') {
+        throw new Error('The dropped value is not a local or remote workspace file URI.');
+      }
+      await this.loadLogcatUri(uri);
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Unable to load dropped logcat: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -224,8 +283,14 @@ class LogcatSourceController implements vscode.Disposable {
       case 'loadLogcat':
         await this.loadLogcat();
         return;
+      case 'loadLogcatUri':
+        await this.loadLogcatUriString(message.uri);
+        return;
       case 'loadLogcatText':
         this.loadLogcatText(message.name, message.text);
+        return;
+      case 'loadLogcatError':
+        void vscode.window.showErrorMessage(`Unable to load dropped logcat: ${message.message}`);
         return;
       case 'clearSession':
         this.clearSession();

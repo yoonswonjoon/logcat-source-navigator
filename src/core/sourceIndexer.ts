@@ -2,7 +2,14 @@ import { createHash } from 'node:crypto';
 import { Dirent } from 'node:fs';
 import { readdir, readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
-import { LogLevel, LoggerApi, SourceIndex, SourceIndexOptions, SourceLogSite } from './types';
+import {
+  CustomLoggerDefinition,
+  LogLevel,
+  LoggerApi,
+  SourceIndex,
+  SourceIndexOptions,
+  SourceLogSite
+} from './types';
 import { quotedStringValue, splitTopLevel, templateFromExpression } from './normalization';
 
 const SOURCE_EXTENSIONS = new Set(['.java', '.kt', '.kts', '.c', '.cc', '.cpp', '.cxx', '.h', '.hpp']);
@@ -14,6 +21,11 @@ interface CallMatch {
   level: LogLevel;
   tagExpression?: string;
   messageExpression?: string;
+}
+
+interface CustomCallPattern {
+  pattern: RegExp;
+  definition: CustomLoggerDefinition;
 }
 
 interface ConstantMap {
@@ -207,10 +219,106 @@ function findEnclosingFunction(lines: string[], line: number): string | undefine
   return undefined;
 }
 
-function findCalls(source: string, constants: ConstantMap): CallMatch[] {
+function escapeRegularExpression(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function customReceiverPattern(receiver: string): RegExp | undefined {
+  const parts = receiver
+    .trim()
+    .split('.')
+    .map((part) => part.trim());
+  if (
+    parts.length === 0 ||
+    parts.some((part) => !/^[A-Za-z_$][\w$]*$/.test(part))
+  ) {
+    return undefined;
+  }
+
+  const expression = parts.map(escapeRegularExpression).join('\\s*\\.\\s*');
+  // Keep this case-sensitive: `L` and `l` are commonly different local names.
+  return new RegExp(
+    `(?<![A-Za-z0-9_$])(${expression})\\s*\\.\\s*(v|d|i|w|e|wtf)\\s*\\(`,
+    'g'
+  );
+}
+
+function configuredCustomCallPatterns(definitions: CustomLoggerDefinition[] | undefined): CustomCallPattern[] {
+  const patterns: CustomCallPattern[] = [];
+  if (!Array.isArray(definitions)) return patterns;
+  for (const definition of definitions) {
+    if (!definition || typeof definition.receiver !== 'string') continue;
+    const pattern = customReceiverPattern(definition.receiver);
+    if (pattern) patterns.push({ pattern, definition });
+  }
+  return patterns;
+}
+
+function argumentAt(args: string[], index: number | undefined): string | undefined {
+  return index !== undefined && Number.isInteger(index) && index >= 0 && index < args.length ? args[index] : undefined;
+}
+
+function hasStaticMessageText(expression: string): boolean {
+  return templateFromExpression(expression).staticChars > 0;
+}
+
+function looksLikeTagExpression(expression: string, constants: ConstantMap): boolean {
+  // A string literal is ambiguous: in `L.e("message", error)` it is the
+  // message, while in `L.e("tag", "message")` it is the tag.  The latter
+  // is handled below only when the second argument actually has message text.
+  if (quotedStringValue(expression) !== undefined) return false;
+  if (resolveTag(expression, constants) !== undefined) return true;
+  return /(?:^|[_$])(?:LOG_)?TAG(?:[_$]|$)/i.test(expression.trim());
+}
+
+function customWrapperArguments(
+  args: string[],
+  definition: CustomLoggerDefinition,
+  constants: ConstantMap
+): Pick<CallMatch, 'tagExpression' | 'messageExpression'> {
+  const configuredMessage = argumentAt(args, definition.messageArgumentIndex);
+  if (configuredMessage !== undefined) {
+    return {
+      tagExpression: argumentAt(args, definition.tagArgumentIndex),
+      messageExpression: configuredMessage
+    };
+  }
+
+  if (args.length === 0) return {};
+  if (args.length === 1) return { messageExpression: args[0] };
+
+  const [first, second] = args;
+  const firstIsLiteral = quotedStringValue(first) !== undefined;
+  const secondHasStaticText = hasStaticMessageText(second);
+  const firstHasStaticText = hasStaticMessageText(first);
+
+  // The usual direct facade signature is (tag, message[, throwable]).  Do
+  // not mistake the common (message, throwable) wrapper shape for it: the
+  // throwable normally has no static text, so the first argument stays the
+  // message.  A non-standard shape can always pin both argument indices.
+  if (
+    looksLikeTagExpression(first, constants) ||
+    (!firstHasStaticText && secondHasStaticText) ||
+    (firstIsLiteral && secondHasStaticText)
+  ) {
+    return { tagExpression: first, messageExpression: second };
+  }
+
+  return { messageExpression: first };
+}
+
+function findCalls(
+  source: string,
+  constants: ConstantMap,
+  customLoggers: CustomLoggerDefinition[] | undefined
+): CallMatch[] {
   const mask = buildCodeMask(source);
   const matches: CallMatch[] = [];
-  const patterns: Array<{ pattern: RegExp; kind: 'java' | 'native' | 'print' }> = [
+  const patterns: Array<{
+    pattern: RegExp;
+    kind: 'java' | 'native' | 'print' | 'custom';
+    definition?: CustomLoggerDefinition;
+  }> = [
     {
       pattern: /\b(?:(?:android\s*\.\s*util\s*\.\s*)?)(Slog|Log)\s*\.\s*(v|d|i|w|e|wtf)\s*\(/gi,
       kind: 'java'
@@ -218,8 +326,15 @@ function findCalls(source: string, constants: ConstantMap): CallMatch[] {
     { pattern: /\b(ALOG[VDIWEF])\s*\(/g, kind: 'native' },
     { pattern: /\b__android_log_print\s*\(/g, kind: 'print' }
   ];
+  patterns.push(
+    ...configuredCustomCallPatterns(customLoggers).map(({ pattern, definition }) => ({
+      pattern,
+      kind: 'custom' as const,
+      definition
+    }))
+  );
 
-  for (const { pattern, kind } of patterns) {
+  for (const { pattern, kind, definition } of patterns) {
     for (const match of source.matchAll(pattern)) {
       const start = match.index ?? 0;
       if (!mask[start]) continue;
@@ -250,6 +365,20 @@ function findCalls(source: string, constants: ConstantMap): CallMatch[] {
           level: levelFromNative(match[1].at(-1) ?? 'D'),
           tagExpression: constants.values.has('LOG_TAG') ? 'LOG_TAG' : undefined,
           messageExpression: args[0]
+        });
+        continue;
+      }
+
+      if (kind === 'custom') {
+        if (!definition) continue;
+        const argumentsForWrapper = customWrapperArguments(args, definition, constants);
+        if (!argumentsForWrapper.messageExpression) continue;
+        matches.push({
+          start,
+          end: call.end,
+          api: 'Custom',
+          level: levelFromJava(match[2]),
+          ...argumentsForWrapper
         });
         continue;
       }
@@ -286,13 +415,14 @@ function findCalls(source: string, constants: ConstantMap): CallMatch[] {
 export function extractLogSitesFromSource(
   source: string,
   filePath: string,
-  relativePath: string
+  relativePath: string,
+  options: Pick<SourceIndexOptions, 'customLoggers'> = {}
 ): SourceLogSite[] {
   const constants = extractConstants(source);
   const lines = source.split(/\r?\n/);
   const lineStarts = buildLineStarts(source);
 
-  return findCalls(source, constants)
+  return findCalls(source, constants, options.customLoggers)
     .filter((call) => call.messageExpression !== undefined)
     .map((call) => {
       const location = lineAndColumn(lineStarts, call.start);
@@ -370,7 +500,7 @@ export async function buildSourceIndex(
       }
 
       const relativePath = path.relative(absoluteRoot, filePath).replaceAll(path.sep, '/');
-      sites.push(...extractLogSitesFromSource(content, filePath, relativePath));
+      sites.push(...extractLogSitesFromSource(content, filePath, relativePath, options));
       scannedFiles += 1;
       onProgress?.(scannedFiles, sites.length, filePath);
       if (scannedFiles % 75 === 0) {

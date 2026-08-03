@@ -1,6 +1,6 @@
 export type LogLevel = 'V' | 'D' | 'I' | 'W' | 'E' | 'F';
 
-export type LoggerApi = 'Log' | 'Slog' | 'ALOG' | 'android_log_print';
+export type LoggerApi = 'Log' | 'Slog' | 'ALOG' | 'android_log_print' | 'Custom';
 
 export type TemplateSegment =
   | { kind: 'literal'; value: string }
@@ -70,7 +70,29 @@ export interface IndexProgress {
   currentPath?: string;
 }
 
+/**
+ * Describes a project-specific Java/Kotlin logging facade.
+ *
+ * For example, `{ receiver: 'L' }` indexes `L.d(...)`, `L.e(...)`, and the
+ * other Android log-level methods.  When the argument indices are omitted,
+ * the indexer supports the common wrapper forms `L.e(message)`,
+ * `L.e(message, throwable)`, and `L.e(tag, message[, throwable])`.
+ *
+ * Set both indices for a wrapper with a non-standard signature, such as
+ * `Audit.e(error, tag, message)`.
+ */
+export interface CustomLoggerDefinition {
+  /** Receiver expression to recognize, such as `L` or `com.example.Trace`. */
+  receiver: string;
+  /** Zero-based argument containing the log tag. */
+  tagArgumentIndex?: number;
+  /** Zero-based argument containing the log message. */
+  messageArgumentIndex?: number;
+}
+
 export interface SourceIndexOptions {
   excludeDirectoryNames: string[];
   maxFileSizeBytes: number;
+  /** Project-specific Java/Kotlin logging facades to index in addition to Log/Slog. */
+  customLoggers?: CustomLoggerDefinition[];
 }
