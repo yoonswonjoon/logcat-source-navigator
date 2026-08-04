@@ -44,6 +44,12 @@ export interface LogcatEvent {
   timestamp?: string;
   pid?: number;
   tid?: number;
+  /**
+   * Optional process / package column provided by some vendor log formats.
+   * Standard logcat formats do not always include it, so callers must treat it
+   * as advisory metadata rather than a required filter key.
+   */
+  process?: string;
   level: LogLevel;
   tag: string;
   message: string;

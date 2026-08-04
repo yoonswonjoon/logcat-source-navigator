@@ -14,6 +14,7 @@ export interface PanelLogRow {
   timestamp?: string;
   pid?: number;
   tid?: number;
+  process?: string;
   level: string;
   tag: string;
   message: string;
@@ -53,6 +54,17 @@ export interface PanelLineRange {
   endLine: number;
 }
 
+export type PanelLogFormatId = 'auto' | 'androidStudioJson' | 'threadtime' | 'brief' | 'vendorPidTid' | 'custom';
+
+/** Current log-text parser selection, including the workspace's reusable custom regex. */
+export interface PanelLogFormat {
+  selectedId: PanelLogFormatId;
+  customName: string;
+  customPattern: string;
+  parsedFormat?: string;
+  parseError?: string;
+}
+
 export interface PanelFilters {
   /** `undefined` means every ID is enabled; an empty array means none are enabled. */
   pids?: number[];
@@ -72,6 +84,7 @@ export interface PanelState {
   renderedEventCount: number;
   logRowsTruncated: boolean;
   lineRange: PanelLineRange;
+  logFormat: PanelLogFormat;
   pids: number[];
   tids: number[];
   filters: PanelFilters;
@@ -89,6 +102,8 @@ export type PanelMessage =
   | { type: 'loadLogcatText'; name: string; text: string }
   | { type: 'loadLogcatError'; message: string }
   | { type: 'clearSession' }
+  | { type: 'selectLogFormat'; formatId: PanelLogFormatId }
+  | { type: 'applyCustomLogFormat'; name: string; pattern: string }
   | { type: 'applyLineRange'; startLine: number; endLine: number }
   | { type: 'toggleIndexedLogs' }
   | { type: 'filterIndexedLogs'; query: string }
@@ -135,7 +150,7 @@ function getHtml(webview: vscode.Webview): string {
   <style>
     :root { color: var(--vscode-foreground); font-family: var(--vscode-font-family); }
     body { margin: 0; color: var(--vscode-foreground); background: var(--vscode-editor-background); }
-    button, input, select { font: inherit; }
+    button, input, select, textarea { font: inherit; }
     button { color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: 0; border-radius: 2px; cursor: pointer; padding: 5px 9px; }
     button:hover { background: var(--vscode-button-hoverBackground); }
     button.secondary { color: var(--vscode-foreground); background: var(--vscode-button-secondaryBackground); }
@@ -147,8 +162,13 @@ function getHtml(webview: vscode.Webview): string {
     .hint, .metadata, .source { color: var(--vscode-descriptionForeground); font-size: .9em; }
     .drop-zone { border: 1px dashed var(--vscode-panel-border); padding: 14px; text-align: center; color: var(--vscode-descriptionForeground); }
     .drop-zone.is-over { background: var(--vscode-list-hoverBackground); }
+    .log-format { display: grid; gap: 6px; border-bottom: 1px solid var(--vscode-panel-border); padding-bottom: 8px; }
+    .log-format-main, .custom-format-actions { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+    .custom-format { display: grid; gap: 6px; padding: 8px; border: 1px solid var(--vscode-panel-border); }
+    .custom-format label { display: grid; gap: 3px; }
+    .custom-format textarea { box-sizing: border-box; width: 100%; min-height: 84px; resize: vertical; font-family: var(--vscode-editor-font-family); font-size: .9em; }
     .filter-group { display: flex; align-items: center; gap: 4px; }
-    select, input[type="search"], input[type="number"] { color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); padding: 4px 6px; }
+    select, input[type="search"], input[type="number"], input[type="text"], textarea { color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); padding: 4px 6px; }
     input[type="search"] { min-width: 160px; }
     .id-filter { position: relative; }
     .id-filter > summary { list-style: none; cursor: pointer; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); padding: 4px 7px; white-space: nowrap; }
@@ -218,8 +238,32 @@ function getHtml(webview: vscode.Webview): string {
     </div>
 
     <div id="drop-zone" class="drop-zone" role="button" tabindex="0">
-      Drop a .log, .logcat, .txt, or .json file here. If drop is blocked by VS Code, click Attach Logcat / .log.
+      Select a log format below, then drop a .log, .logcat, .txt, or .json file here. If drop is blocked by VS Code, click Attach Logcat / .log.
     </div>
+
+    <section id="log-format" class="log-format" aria-label="Log text format">
+      <div class="log-format-main">
+        <label>Log format
+          <select id="log-format-select">
+            <option value="auto">Auto detect</option>
+            <option value="androidStudioJson">Android Studio JSON</option>
+            <option value="threadtime">Threadtime (PID TID)</option>
+            <option value="brief">Brief (I/Tag(pid))</option>
+            <option value="vendorPidTid">Vendor PID-TID text</option>
+            <option value="custom">Custom regex profile</option>
+          </select>
+        </label>
+        <span id="log-format-status" class="hint"></span>
+      </div>
+      <div id="custom-format" class="custom-format" hidden>
+        <label>Profile name <input id="custom-format-name" type="text" maxlength="80" placeholder="My vendor text format" /></label>
+        <label>Line regex
+          <textarea id="custom-format-pattern" spellcheck="false" placeholder="^(?&lt;timestamp&gt;...)\\s+(?&lt;pid&gt;\\d+)-(?&lt;tid&gt;\\d+)\\s+(?&lt;level&gt;[VDIWEF])\\s+(?&lt;tag&gt;[^:]+):\\s*(?&lt;message&gt;.*)$"></textarea>
+        </label>
+        <span class="hint">Use JavaScript named groups: <code>level</code>, <code>tag</code>, and <code>message</code> are required. Optional: <code>timestamp</code> or <code>date</code> + <code>time</code>, <code>pid</code>, <code>tid</code>, <code>process</code>, <code>package</code>.</span>
+        <div class="custom-format-actions"><button id="apply-custom-format" class="secondary" type="button">Save &amp; Apply Custom Format</button><span class="hint">Saved for this VS Code workspace.</span></div>
+      </div>
+    </section>
 
     <section id="filters" class="filters" aria-label="Log filters"></section>
     <section id="line-range" class="line-range" aria-label="Logcat line range">
@@ -297,6 +341,22 @@ function getHtml(webview: vscode.Webview): string {
       const details = element.closest('[data-filter-group]');
       if (details && details.dataset.filterGroup) openIdFilters[details.dataset.filterGroup] = details.open;
     }
+    function renderLogFormat() {
+      const format = state.logFormat;
+      const selector = byId('log-format-select');
+      if (selector.value !== format.selectedId) selector.value = format.selectedId;
+      const custom = byId('custom-format');
+      custom.hidden = format.selectedId !== 'custom';
+      const name = byId('custom-format-name');
+      const pattern = byId('custom-format-pattern');
+      if (document.activeElement !== name) name.value = format.customName;
+      if (document.activeElement !== pattern) pattern.value = format.customPattern;
+      byId('log-format-status').textContent = format.parseError
+        ? 'Format error: ' + format.parseError
+        : (format.parsedFormat
+          ? format.parsedFormat + ' · ' + state.totalEventCount + ' parsed events'
+          : 'Choose a format before loading.');
+    }
     function renderFilters() {
       const filters = state.filters;
       byId('filters').innerHTML =
@@ -372,7 +432,7 @@ function getHtml(webview: vscode.Webview): string {
           '<span>' + escapeHtml(row.timestamp || '-') + '</span>' +
           '<span class="pid">' + escapeHtml((row.pid || '-') + '/' + (row.tid || '-')) + '</span>' +
           '<span>' + escapeHtml(row.level) + '</span>' +
-          '<span class="tag">' + escapeHtml(row.tag) + '</span>' +
+          '<span class="tag">' + escapeHtml((row.process ? row.process + ' / ' : '') + row.tag) + '</span>' +
           '<span class="message">' + escapeHtml(row.message) + '</span>' +
           '<span class="status ' + row.status + '">' + statusText(row.status) + '</span>' +
         '</button>'
@@ -442,8 +502,9 @@ function getHtml(webview: vscode.Webview): string {
         : state.displayedEventCount + ' visible events';
       byId('summary').innerHTML = '<span>' + visibleEventText + '</span><span class="hint">' + escapeHtml(state.notice || (state.loadedLogcatName ? state.loadedLogcatName : 'No logcat loaded')) + '</span>';
       byId('browse-index-button').textContent = browsingIndexedLogs ? 'Back to Logcat' : 'Browse Indexed Logs';
-      ['drop-zone', 'filters', 'line-range', 'summary', 'log-list', 'candidates'].forEach((id) => { byId(id).hidden = browsingIndexedLogs; });
+      ['drop-zone', 'log-format', 'filters', 'line-range', 'summary', 'log-list', 'candidates'].forEach((id) => { byId(id).hidden = browsingIndexedLogs; });
       if (!browsingIndexedLogs) {
+        renderLogFormat();
         renderFilters();
         renderLineRange();
         renderRows();
@@ -520,6 +581,11 @@ function getHtml(webview: vscode.Webview): string {
     }
     byId('index-button').addEventListener('click', () => post('indexSources'));
     byId('load-button').addEventListener('click', () => post('loadLogcat'));
+    byId('log-format-select').addEventListener('change', () => post('selectLogFormat', { formatId: byId('log-format-select').value }));
+    byId('apply-custom-format').addEventListener('click', () => post('applyCustomLogFormat', {
+      name: byId('custom-format-name').value,
+      pattern: byId('custom-format-pattern').value
+    }));
     byId('browse-index-button').addEventListener('click', () => post('toggleIndexedLogs'));
     byId('clear-button').addEventListener('click', () => post('clearSession'));
     byId('indexed-log-query').addEventListener('input', () => {

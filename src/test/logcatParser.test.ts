@@ -7,7 +7,11 @@ import {
   filterLogcatEventsByLineRange,
   normalizeLogLineRange
 } from '../core/logRange';
-import { availablePids, parseLogcat } from '../core/logcatParser';
+import {
+  availablePids,
+  parseLogcat,
+  parseLogcatWithFormat
+} from '../core/logcatParser';
 
 test('parses threadtime and brief logcat formats and groups continuation lines', () => {
   const logcat = [
@@ -43,6 +47,88 @@ test('parses full-date threadtime lines from text .log exports', () => {
   assert.equal(events[1].timestamp, '2026-08-03 22:13:51.456');
   assert.equal(events[1].level, 'E');
   assert.equal(events[1].message, 'retry exhausted');
+});
+
+test('parses vendor PID-TID text and keeps continuation lines with the preceding event', () => {
+  const vendorLog = [
+    '2026-08-04 10:00:00.000 3616-3616 I HMG-RotaryController: onAccessibilityEvent: EventType: TYPE_VIEW_FOCUSED',
+    '    details: focused control=42',
+    '2026-08-04 10:00:01.000 3616 - 4812 W HMG-RotaryController: retry scheduled'
+  ].join('\n');
+
+  const result = parseLogcatWithFormat(vendorLog, 'vendorPidTid');
+  assert.equal(result.selectedFormat, 'vendorPidTid');
+  assert.equal(result.chosenFormat, 'vendorPidTid');
+  assert.equal(result.parsedEventCount, 2);
+  assert.equal(result.events[0].timestamp, '2026-08-04 10:00:00.000');
+  assert.equal(result.events[0].pid, 3616);
+  assert.equal(result.events[0].tid, 3616);
+  assert.equal(result.events[0].tag, 'HMG-RotaryController');
+  assert.equal(result.events[0].message, 'onAccessibilityEvent: EventType: TYPE_VIEW_FOCUSED');
+  assert.deepEqual(result.events[0].rawLines, [
+    '2026-08-04 10:00:00.000 3616-3616 I HMG-RotaryController: onAccessibilityEvent: EventType: TYPE_VIEW_FOCUSED',
+    '    details: focused control=42'
+  ]);
+  assert.equal(result.events[1].tid, 4812);
+
+  const automaticResult = parseLogcatWithFormat(vendorLog, 'auto');
+  assert.equal(automaticResult.chosenFormat, 'vendorPidTid');
+  const automatic = parseLogcat(vendorLog);
+  assert.equal(automatic.length, 2);
+  assert.equal(automatic[0].tag, 'HMG-RotaryController');
+});
+
+test('parses a custom named-group profile including an optional process column', () => {
+  const customLog = [
+    '2026/08/04 10:01:02.123 | 3616 4812 | INFO | com.example.rotary | HMG-RotaryController | onAccessibilityEvent: EventType: TYPE_VIEW_FOCUSED',
+    '    callback source: knob',
+    '2026/08/04 10:01:03.123 | 3616 4812 | WARN | com.example.rotary | HMG-RotaryController | retry scheduled'
+  ].join('\n');
+  const result = parseLogcatWithFormat(customLog, {
+    format: 'custom',
+    profile: {
+      name: 'Pipe-delimited vendor log',
+      pattern:
+        '^(?<date>\\d{4}/\\d{2}/\\d{2})\\s+(?<time>\\d{2}:\\d{2}:\\d{2}\\.\\d+)\\s+\\|\\s+(?<pid>\\d+)\\s+(?<tid>\\d+)\\s+\\|\\s+(?<level>[A-Z]+)\\s+\\|\\s+(?<process>[^|]+?)\\s+\\|\\s+(?<tag>[^|]+?)\\s+\\|\\s+(?<message>.*)$'
+    }
+  });
+
+  assert.equal(result.selectedFormat, 'custom');
+  assert.equal(result.chosenFormat, 'custom');
+  assert.equal(result.parsedEventCount, 2);
+  assert.equal(result.events[0].timestamp, '2026/08/04 10:01:02.123');
+  assert.equal(result.events[0].pid, 3616);
+  assert.equal(result.events[0].tid, 4812);
+  assert.equal(result.events[0].process, 'com.example.rotary');
+  assert.equal(result.events[0].level, 'I');
+  assert.equal(result.events[0].tag, 'HMG-RotaryController');
+  assert.equal(result.events[0].message, 'onAccessibilityEvent: EventType: TYPE_VIEW_FOCUSED');
+  assert.equal(result.events[0].inputEndLine, 2);
+  assert.equal(result.events[1].level, 'W');
+  assert.equal(result.diagnostics.length, 0);
+});
+
+test('retains a custom package named group as process metadata', () => {
+  const result = parseLogcatWithFormat('I com.example.rotary HMG-RotaryController: connected', {
+    format: 'custom',
+    profile: {
+      pattern: '^(?<level>[VDIWEF])\\s+(?<package>[^\\s]+)\\s+(?<tag>[^:]+):\\s*(?<message>.*)$'
+    }
+  });
+
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0].process, 'com.example.rotary');
+  assert.equal(result.events[0].tag, 'HMG-RotaryController');
+});
+
+test('reports a useful diagnostic when a custom profile lacks required named groups', () => {
+  const result = parseLogcatWithFormat('I DemoTag: hello', {
+    format: 'custom',
+    profile: { pattern: '^(?<tag>[^:]+): (?<message>.*)$' }
+  });
+
+  assert.equal(result.parsedEventCount, 0);
+  assert.equal(result.diagnostics[0]?.code, 'MISSING_CUSTOM_GROUPS');
 });
 
 test('parses Android Studio JSON logcat exports', () => {

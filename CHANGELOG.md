@@ -2,6 +2,13 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.4.0 - 2026-08-04
+
+- Added a selectable log-text format control: Auto, Android Studio JSON, Threadtime, Brief, and vendor `PID-TID` text.
+- Added a workspace-persisted custom regex profile with named fields for level, tag, message, timestamp, PID/TID, and process/package.
+- Reparse an already loaded log when its format changes, without choosing the file again.
+- Recognize vendor rows such as `3616-3616 I Tag: message`, then pass their normalized fields to the existing source mapper.
+
 ## 0.3.0 - 2026-08-04
 
 - Added **Browse Indexed Logs**, a searchable source-index browser that opens and highlights each logging call site without requiring a logcat file.

@@ -139,7 +139,7 @@ export function filterMappedEvents(events: MappedLogEvent[], filter: LogFilter):
       const candidateText = mapped.candidates
         .map((candidate) => `${candidate.site.relativePath} ${candidate.site.functionName ?? ''}`)
         .join(' ');
-      const searchable = `${event.tag} ${event.message} ${candidateText}`.toLowerCase();
+      const searchable = `${event.process ?? ''} ${event.tag} ${event.message} ${candidateText}`.toLowerCase();
       if (!searchable.includes(query)) return false;
     }
     return true;
