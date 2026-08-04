@@ -9,7 +9,13 @@ import {
   LogLineRange,
   normalizeLogLineRange
 } from './core/logRange';
-import { availablePids, availableTids, parseLogcat } from './core/logcatParser';
+import {
+  availablePids,
+  availableTids,
+  LogFormatSelection,
+  parseLogcatWithFormat,
+  ResolvedLogFormat
+} from './core/logcatParser';
 import { filterMappedEvents, isAutomaticallyNavigable, LogFilter, matchLogcatEvents } from './core/matcher';
 import { buildSourceIndex } from './core/sourceIndexer';
 import {
@@ -22,6 +28,7 @@ import {
 } from './core/types';
 import {
   PanelIndexedLogRow,
+  PanelLogFormatId,
   LogcatSourceViewProvider,
   PanelFilters,
   PanelLogRow,
@@ -32,6 +39,41 @@ import {
 const VIEW_ID = 'logcatSourceNavigator.logView';
 const LEVELS = ['V', 'D', 'I', 'W', 'E', 'F'];
 const MAX_PANEL_LOG_ROWS = 2_000;
+const LOG_FORMAT_STORAGE_KEY = 'logcatSourceNavigator.logFormat';
+const LOG_FORMAT_IDS: PanelLogFormatId[] = ['auto', 'androidStudioJson', 'threadtime', 'brief', 'vendorPidTid', 'custom'];
+const LOG_FORMAT_LABELS: Record<PanelLogFormatId | ResolvedLogFormat, string> = {
+  auto: 'Auto',
+  androidStudioJson: 'Android Studio JSON',
+  threadtime: 'Threadtime',
+  brief: 'Brief',
+  vendorPidTid: 'Vendor PID-TID',
+  custom: 'Custom regex',
+  unknown: 'Unknown text format'
+};
+
+interface StoredLogFormat {
+  selectedId?: unknown;
+  customName?: unknown;
+  customPattern?: unknown;
+}
+
+function normalizeLogFormatId(value: unknown): PanelLogFormatId {
+  return typeof value === 'string' && LOG_FORMAT_IDS.includes(value as PanelLogFormatId)
+    ? value as PanelLogFormatId
+    : 'auto';
+}
+
+function normalizeCustomFormatName(value: unknown): string {
+  return typeof value === 'string' && value.trim() ? value.trim().slice(0, 80) : 'Workspace custom format';
+}
+
+function normalizeCustomFormatPattern(value: unknown): string {
+  return typeof value === 'string' ? value.trim().slice(0, 8_000) : '';
+}
+
+function logFormatLabel(format: PanelLogFormatId | ResolvedLogFormat): string {
+  return LOG_FORMAT_LABELS[format];
+}
 
 function normalizeIdFilter(value: unknown): number[] | undefined {
   if (!Array.isArray(value)) return undefined;
@@ -81,6 +123,13 @@ class LogcatSourceController implements vscode.Disposable {
   private mappingLineRange?: LogLineRange;
   private logcatPids: number[] = [];
   private logcatTids: number[] = [];
+  private loadedLogcatUri?: vscode.Uri;
+  private loadedLogcatText?: string;
+  private logFormatId: PanelLogFormatId = 'auto';
+  private customFormatName = 'Workspace custom format';
+  private customFormatPattern = '';
+  private parsedFormat?: string;
+  private logFormatError?: string;
   private indexedLogsVisible = false;
   private indexedLogsQuery = '';
   private lastEditor?: vscode.TextEditor;
@@ -103,6 +152,10 @@ class LogcatSourceController implements vscode.Disposable {
   }
 
   async initialize(): Promise<void> {
+    const storedFormat = this.context.workspaceState.get<StoredLogFormat>(LOG_FORMAT_STORAGE_KEY);
+    this.logFormatId = normalizeLogFormatId(storedFormat?.selectedId);
+    this.customFormatName = normalizeCustomFormatName(storedFormat?.customName);
+    this.customFormatPattern = normalizeCustomFormatPattern(storedFormat?.customPattern);
     this.sourceIndex = await this.store.load();
     if (this.sourceIndex) {
       this.notice = `Loaded cached index with ${this.sourceIndex.sites.length} source logs.`;
@@ -210,7 +263,9 @@ class LogcatSourceController implements vscode.Disposable {
     this.postState();
     try {
       const bytes = await vscode.workspace.fs.readFile(uri);
-      this.loadLogcatText(name, Buffer.from(bytes).toString('utf8'));
+      this.loadedLogcatUri = uri;
+      this.loadedLogcatText = undefined;
+      this.applyLoadedLogcatText(name, Buffer.from(bytes).toString('utf8'));
     } catch (error) {
       this.notice = `Unable to load ${name}: ${error instanceof Error ? error.message : String(error)}`;
       this.postState();
@@ -236,21 +291,123 @@ class LogcatSourceController implements vscode.Disposable {
   }
 
   loadLogcatText(name: string, text: string): void {
-    this.logcatEvents = parseLogcat(text);
+    // Webview drop events do not reliably expose a reusable file URI. Keep
+    // their text for this session so changing the format can reparse it.
+    this.loadedLogcatUri = undefined;
+    this.loadedLogcatText = text;
+    this.applyLoadedLogcatText(name, text);
+  }
+
+  private applyLoadedLogcatText(name: string, text: string, preserveRange = false): void {
+    const previousRange = preserveRange ? this.mappingLineRange : undefined;
+    const result = parseLogcatWithFormat(text, this.currentLogFormatSelection());
+    this.logcatEvents = result.events;
     this.loadedLogcatName = name;
     const highestEventLine = this.logcatEvents.reduce((highest, event) => Math.max(highest, event.inputEndLine), 0);
-    this.logcatLineCount = Math.max(countLogTextLines(text), highestEventLine);
-    this.mappingLineRange = defaultLogMappingRange(this.logcatLineCount);
+    this.logcatLineCount = Math.max(result.inputLineCount, countLogTextLines(text), highestEventLine);
+    this.mappingLineRange = previousRange
+      ? normalizeLogLineRange(this.logcatLineCount, previousRange)
+      : defaultLogMappingRange(this.logcatLineCount);
     this.logcatPids = availablePids(this.logcatEvents);
     this.logcatTids = availableTids(this.logcatEvents);
     this.selectedId = undefined;
+    this.clearDecoration();
+    this.filters = {
+      ...this.filters,
+      pids: undefined,
+      tids: undefined
+    };
+    this.logFormatError = result.diagnostics.find((diagnostic) => diagnostic.severity === 'error')?.message;
+    this.parsedFormat = this.describeParsedFormat(result.chosenFormat);
     const rangeText = this.mappingLineRange
       ? `${this.mappingLineRange.startLine}–${this.mappingLineRange.endLine} of ${this.logcatLineCount}`
       : undefined;
+    const parseMessage = this.logFormatError ?? result.diagnostics.at(0)?.message;
     this.notice = this.logcatEvents.length
-      ? `Loaded ${this.logcatEvents.length} parsed logcat events. Mapping input lines ${rangeText}.`
-      : 'No supported logcat lines were found. Try adb logcat -v threadtime.';
+      ? `Loaded ${this.logcatEvents.length} ${this.parsedFormat} events. Mapping input lines ${rangeText}.`
+      : (parseMessage ?? `No log headers matched ${this.describeSelectedFormat()}. Try Auto or Custom regex.`);
     this.refreshMappings();
+  }
+
+  private currentLogFormatSelection(): LogFormatSelection {
+    if (this.logFormatId === 'custom') {
+      return {
+        format: 'custom',
+        profile: {
+          name: this.customFormatName,
+          pattern: this.customFormatPattern
+        }
+      };
+    }
+    return this.logFormatId;
+  }
+
+  private describeSelectedFormat(): string {
+    return this.logFormatId === 'custom' ? this.customFormatName : logFormatLabel(this.logFormatId);
+  }
+
+  private describeParsedFormat(format: ResolvedLogFormat): string {
+    if (this.logFormatId === 'auto' && format !== 'unknown') {
+      return `Auto: ${logFormatLabel(format)}`;
+    }
+    return format === 'custom' ? this.customFormatName : logFormatLabel(format);
+  }
+
+  private async persistLogFormat(): Promise<void> {
+    await this.context.workspaceState.update(LOG_FORMAT_STORAGE_KEY, {
+      selectedId: this.logFormatId,
+      customName: this.customFormatName,
+      customPattern: this.customFormatPattern
+    } satisfies StoredLogFormat);
+  }
+
+  async selectLogFormat(formatId: PanelLogFormatId): Promise<void> {
+    this.logFormatId = normalizeLogFormatId(formatId);
+    this.parsedFormat = undefined;
+    this.logFormatError = undefined;
+    await this.persistLogFormat();
+    await this.reparseLoadedLogcat();
+  }
+
+  async applyCustomLogFormat(name: string, pattern: string): Promise<void> {
+    this.customFormatName = normalizeCustomFormatName(name);
+    this.customFormatPattern = normalizeCustomFormatPattern(pattern);
+    this.logFormatId = 'custom';
+    this.parsedFormat = undefined;
+    this.logFormatError = undefined;
+    await this.persistLogFormat();
+    await this.reparseLoadedLogcat();
+  }
+
+  private async reparseLoadedLogcat(): Promise<void> {
+    if (!this.loadedLogcatName) {
+      if (this.logFormatId === 'custom') {
+        const validation = parseLogcatWithFormat('', this.currentLogFormatSelection());
+        this.logFormatError = validation.diagnostics.find((diagnostic) => diagnostic.severity === 'error')?.message;
+      }
+      this.postState();
+      return;
+    }
+
+    const name = this.loadedLogcatName;
+    this.notice = `Reparsing ${name} as ${this.describeSelectedFormat()}...`;
+    this.postState();
+    try {
+      if (this.loadedLogcatUri) {
+        const bytes = await vscode.workspace.fs.readFile(this.loadedLogcatUri);
+        this.applyLoadedLogcatText(name, Buffer.from(bytes).toString('utf8'), true);
+        return;
+      }
+      if (this.loadedLogcatText !== undefined) {
+        this.applyLoadedLogcatText(name, this.loadedLogcatText, true);
+        return;
+      }
+      throw new Error('The original text is no longer available. Reload the log file.');
+    } catch (error) {
+      this.logFormatError = error instanceof Error ? error.message : String(error);
+      this.notice = `Unable to reparse ${name}: ${this.logFormatError}`;
+      this.postState();
+    }
   }
 
   clearSession(): void {
@@ -261,10 +418,14 @@ class LogcatSourceController implements vscode.Disposable {
     this.panelLogRowsTruncated = false;
     this.selectedId = undefined;
     this.loadedLogcatName = undefined;
+    this.loadedLogcatUri = undefined;
+    this.loadedLogcatText = undefined;
     this.logcatLineCount = 0;
     this.mappingLineRange = undefined;
     this.logcatPids = [];
     this.logcatTids = [];
+    this.parsedFormat = undefined;
+    this.logFormatError = undefined;
     this.notice = 'Cleared loaded logcat events. The source index is retained.';
     this.clearDecoration();
     this.postState();
@@ -365,6 +526,12 @@ class LogcatSourceController implements vscode.Disposable {
       case 'clearSession':
         this.clearSession();
         return;
+      case 'selectLogFormat':
+        await this.selectLogFormat(message.formatId);
+        return;
+      case 'applyCustomLogFormat':
+        await this.applyCustomLogFormat(message.name, message.pattern);
+        return;
       case 'applyLineRange':
         this.setMappingLineRange(message.startLine, message.endLine);
         return;
@@ -385,6 +552,9 @@ class LogcatSourceController implements vscode.Disposable {
         return;
       case 'openCandidate':
         this.openCandidate(message.eventId, message.candidateId);
+        return;
+      case 'openIndexedLog':
+        this.openIndexedLog(message.id);
         return;
       default:
         return;
@@ -421,6 +591,7 @@ class LogcatSourceController implements vscode.Disposable {
       timestamp: mapped.event.timestamp,
       pid: mapped.event.pid,
       tid: mapped.event.tid,
+      process: mapped.event.process,
       level: mapped.event.level,
       tag: mapped.event.tag,
       message: mapped.event.message,
@@ -445,6 +616,13 @@ class LogcatSourceController implements vscode.Disposable {
         totalLineCount: this.logcatLineCount,
         startLine: this.mappingLineRange?.startLine ?? 0,
         endLine: this.mappingLineRange?.endLine ?? 0
+      },
+      logFormat: {
+        selectedId: this.logFormatId,
+        customName: this.customFormatName,
+        customPattern: this.customFormatPattern,
+        parsedFormat: this.parsedFormat,
+        parseError: this.logFormatError
       },
       pids: this.logcatPids,
       tids: this.logcatTids,

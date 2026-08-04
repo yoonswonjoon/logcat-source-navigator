@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { parseLogcatWithFormat } from '../core/logcatParser';
 import { matchLogcatEvents } from '../core/matcher';
 import { extractLogSitesFromSource } from '../core/sourceIndexer';
 import { LogcatEvent } from '../core/types';
@@ -28,6 +29,28 @@ test('maps a dynamic source template to a unique runtime log', () => {
   assert.equal(mapped.status, 'pattern');
   assert.equal(mapped.candidates.length, 1);
   assert.equal(mapped.candidates[0].site.functionName, 'run');
+});
+
+test('maps a vendor PID-TID text row after format normalization', () => {
+  const source = [
+    'class Example {',
+    '  static final String TAG = "HMG-RotaryController";',
+    '  void onAccessibilityEvent(Object event) {',
+    '    Log.i(TAG, "onAccessibilityEvent: " + event);',
+    '  }',
+    '}'
+  ].join('\n');
+  const sites = extractLogSitesFromSource(source, '/tmp/Example.java', 'Example.java');
+  const parsed = parseLogcatWithFormat(
+    '2026-08-04 10:00:00.000 3616-3616 I HMG-RotaryController: onAccessibilityEvent: EventType: TYPE_VIEW_FOCUSED',
+    'vendorPidTid'
+  );
+  const [mapped] = matchLogcatEvents(parsed.events, sites);
+
+  assert.equal(parsed.events[0].pid, 3616);
+  assert.equal(parsed.events[0].tid, 3616);
+  assert.equal(mapped.status, 'pattern');
+  assert.equal(mapped.candidates[0].site.functionName, 'onAccessibilityEvent');
 });
 
 test('preserves duplicate source locations as ambiguous candidates', () => {

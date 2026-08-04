@@ -1,8 +1,8 @@
 {
   "name": "logcat-source-navigator",
   "displayName": "Logcat Source Navigator",
-  "description": "Map Android logcat rows and browse indexed logging call sites.",
-  "version": "0.3.0",
+  "description": "Map Android log text in selectable formats to indexed source logging call sites.",
+  "version": "0.4.0",
   "publisher": "local",
   "license": "MIT",
   "repository": {
