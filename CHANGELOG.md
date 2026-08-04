@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented in this file.
 
+## 0.3.0 - 2026-08-04
+
+- Added **Browse Indexed Logs**, a searchable source-index browser that opens and highlights each logging call site without requiring a logcat file.
+- Capped index-browser transfer to 500 rows while retaining a full match count, so large Android source trees remain responsive.
+- Added an inclusive **Map input lines** range selector for loaded logcat files; large logs initially map only their newest 10,000 input lines.
+- Limited the rendered logcat list to 2,000 filtered rows and prompts users to narrow the range when more remain.
+- Optimized matching by grouping indexed sites by level and tag before mapping, avoiding a full source-index scan for every log event.
+
 ## 0.2.0 - 2026-08-04
 
 - Added configurable Java/Kotlin logger facades, including `L.e(...)` and `L.w(...)` wrappers.

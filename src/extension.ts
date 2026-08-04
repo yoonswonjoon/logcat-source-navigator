@@ -1,11 +1,27 @@
 import path from 'node:path';
 import * as vscode from 'vscode';
 import { SourceIndexStore } from './core/indexStore';
+import { searchSourceLogSites } from './core/indexSearch';
+import {
+  countLogTextLines,
+  defaultLogMappingRange,
+  filterLogcatEventsByLineRange,
+  LogLineRange,
+  normalizeLogLineRange
+} from './core/logRange';
 import { availablePids, availableTids, parseLogcat } from './core/logcatParser';
 import { filterMappedEvents, isAutomaticallyNavigable, LogFilter, matchLogcatEvents } from './core/matcher';
 import { buildSourceIndex } from './core/sourceIndexer';
-import { CustomLoggerDefinition, LogcatEvent, MappedLogEvent, MatchCandidate, SourceIndex } from './core/types';
 import {
+  CustomLoggerDefinition,
+  LogcatEvent,
+  MappedLogEvent,
+  MatchCandidate,
+  SourceIndex,
+  SourceLogSite
+} from './core/types';
+import {
+  PanelIndexedLogRow,
   LogcatSourceViewProvider,
   PanelFilters,
   PanelLogRow,
@@ -15,6 +31,7 @@ import {
 
 const VIEW_ID = 'logcatSourceNavigator.logView';
 const LEVELS = ['V', 'D', 'I', 'W', 'E', 'F'];
+const MAX_PANEL_LOG_ROWS = 2_000;
 
 function normalizeIdFilter(value: unknown): number[] | undefined {
   if (!Array.isArray(value)) return undefined;
@@ -56,8 +73,16 @@ class LogcatSourceController implements vscode.Disposable {
   private logcatEvents: LogcatEvent[] = [];
   private mappedEvents: MappedLogEvent[] = [];
   private displayedEvents: MappedLogEvent[] = [];
+  private filteredEventCount = 0;
+  private panelLogRowsTruncated = false;
   private selectedId?: string;
   private loadedLogcatName?: string;
+  private logcatLineCount = 0;
+  private mappingLineRange?: LogLineRange;
+  private logcatPids: number[] = [];
+  private logcatTids: number[] = [];
+  private indexedLogsVisible = false;
+  private indexedLogsQuery = '';
   private lastEditor?: vscode.TextEditor;
   private notice?: string;
   private filters: PanelFilters = {
@@ -91,6 +116,12 @@ class LogcatSourceController implements vscode.Disposable {
 
   async focus(): Promise<void> {
     await vscode.commands.executeCommand(`${VIEW_ID}.focus`);
+  }
+
+  async browseIndexedLogs(): Promise<void> {
+    await this.focus();
+    this.indexedLogsVisible = true;
+    this.postState();
   }
 
   async indexSources(): Promise<void> {
@@ -207,9 +238,17 @@ class LogcatSourceController implements vscode.Disposable {
   loadLogcatText(name: string, text: string): void {
     this.logcatEvents = parseLogcat(text);
     this.loadedLogcatName = name;
+    const highestEventLine = this.logcatEvents.reduce((highest, event) => Math.max(highest, event.inputEndLine), 0);
+    this.logcatLineCount = Math.max(countLogTextLines(text), highestEventLine);
+    this.mappingLineRange = defaultLogMappingRange(this.logcatLineCount);
+    this.logcatPids = availablePids(this.logcatEvents);
+    this.logcatTids = availableTids(this.logcatEvents);
     this.selectedId = undefined;
+    const rangeText = this.mappingLineRange
+      ? `${this.mappingLineRange.startLine}–${this.mappingLineRange.endLine} of ${this.logcatLineCount}`
+      : undefined;
     this.notice = this.logcatEvents.length
-      ? `Loaded ${this.logcatEvents.length} parsed logcat events.`
+      ? `Loaded ${this.logcatEvents.length} parsed logcat events. Mapping input lines ${rangeText}.`
       : 'No supported logcat lines were found. Try adb logcat -v threadtime.';
     this.refreshMappings();
   }
@@ -218,8 +257,14 @@ class LogcatSourceController implements vscode.Disposable {
     this.logcatEvents = [];
     this.mappedEvents = [];
     this.displayedEvents = [];
+    this.filteredEventCount = 0;
+    this.panelLogRowsTruncated = false;
     this.selectedId = undefined;
     this.loadedLogcatName = undefined;
+    this.logcatLineCount = 0;
+    this.mappingLineRange = undefined;
+    this.logcatPids = [];
+    this.logcatTids = [];
     this.notice = 'Cleared loaded logcat events. The source index is retained.';
     this.clearDecoration();
     this.postState();
@@ -237,6 +282,15 @@ class LogcatSourceController implements vscode.Disposable {
       mappedOnly: Boolean(filters.mappedOnly)
     };
     this.selectedId = undefined;
+    this.refreshMappings();
+  }
+
+  setMappingLineRange(startLine: number, endLine: number): void {
+    const range = normalizeLogLineRange(this.logcatLineCount, { startLine, endLine });
+    if (!range) return;
+    this.mappingLineRange = range;
+    this.selectedId = undefined;
+    this.notice = `Mapping input lines ${range.startLine}–${range.endLine} of ${this.logcatLineCount}.`;
     this.refreshMappings();
   }
 
@@ -272,6 +326,22 @@ class LogcatSourceController implements vscode.Disposable {
     this.postState();
   }
 
+  toggleIndexedLogs(): void {
+    this.indexedLogsVisible = !this.indexedLogsVisible;
+    this.postState();
+  }
+
+  setIndexedLogsQuery(query: string): void {
+    this.indexedLogsQuery = typeof query === 'string' ? query.slice(0, 1000) : '';
+    this.postState();
+  }
+
+  openIndexedLog(id: string): void {
+    const site = this.sourceIndex?.sites.find((entry) => entry.id === id);
+    if (!site) return;
+    void this.navigateToSite(site);
+  }
+
   private async handleMessage(message: PanelMessage): Promise<void> {
     switch (message.type) {
       case 'ready':
@@ -295,6 +365,15 @@ class LogcatSourceController implements vscode.Disposable {
       case 'clearSession':
         this.clearSession();
         return;
+      case 'applyLineRange':
+        this.setMappingLineRange(message.startLine, message.endLine);
+        return;
+      case 'toggleIndexedLogs':
+        this.toggleIndexedLogs();
+        return;
+      case 'filterIndexedLogs':
+        this.setIndexedLogsQuery(message.query);
+        return;
       case 'filter':
         this.setFilters(message.filters);
         return;
@@ -313,16 +392,23 @@ class LogcatSourceController implements vscode.Disposable {
   }
 
   private refreshMappings(): void {
-    const preMatchEvents = this.logcatEvents.filter((event) => {
+    const rangedEvents = filterLogcatEventsByLineRange(this.logcatEvents, this.mappingLineRange);
+    const preMatchEvents = rangedEvents.filter((event) => {
       if (this.filters.pids !== undefined && (event.pid === undefined || !this.filters.pids.includes(event.pid))) return false;
       if (this.filters.tids !== undefined && (event.tid === undefined || !this.filters.tids.includes(event.tid))) return false;
       return this.filters.levels.includes(event.level);
     });
     this.mappedEvents = matchLogcatEvents(preMatchEvents, this.sourceIndex?.sites ?? []);
-    this.displayedEvents = filterMappedEvents(this.mappedEvents, {
+    const filteredEvents = filterMappedEvents(this.mappedEvents, {
       query: this.filters.query,
       mappedOnly: this.filters.mappedOnly
     } satisfies LogFilter);
+    this.filteredEventCount = filteredEvents.length;
+    this.panelLogRowsTruncated = filteredEvents.length > MAX_PANEL_LOG_ROWS;
+    // Rendering thousands of complete candidate lists can freeze a webview.
+    // Navigation intentionally follows the same capped list; users can narrow
+    // the input-line range or filters to inspect a different portion.
+    this.displayedEvents = filteredEvents.slice(0, MAX_PANEL_LOG_ROWS);
     if (!this.displayedEvents.some((entry) => entry.event.id === this.selectedId)) {
       this.selectedId = undefined;
     }
@@ -341,17 +427,36 @@ class LogcatSourceController implements vscode.Disposable {
       status: mapped.status,
       candidates: mapped.candidates.map((candidate) => this.serializeCandidate(candidate))
     }));
+    // Avoid scanning a large source index every time a log-row selection posts
+    // state. The browser requests its capped search result only while open.
+    const indexedLogSearch = this.indexedLogsVisible
+      ? searchSourceLogSites(this.sourceIndex?.sites ?? [], this.indexedLogsQuery)
+      : undefined;
     return {
       sourceRoots: this.sourceIndex?.roots ?? [],
       sourceSiteCount: this.sourceIndex?.sites.length ?? 0,
       indexCreatedAt: this.sourceIndex?.createdAt,
       loadedLogcatName: this.loadedLogcatName,
       totalEventCount: this.logcatEvents.length,
-      displayedEventCount: rows.length,
-      pids: availablePids(this.logcatEvents),
-      tids: availableTids(this.logcatEvents),
+      displayedEventCount: this.filteredEventCount,
+      renderedEventCount: rows.length,
+      logRowsTruncated: this.panelLogRowsTruncated,
+      lineRange: {
+        totalLineCount: this.logcatLineCount,
+        startLine: this.mappingLineRange?.startLine ?? 0,
+        endLine: this.mappingLineRange?.endLine ?? 0
+      },
+      pids: this.logcatPids,
+      tids: this.logcatTids,
       filters: this.filters,
       rows,
+      indexedLogs: {
+        visible: this.indexedLogsVisible,
+        query: this.indexedLogsQuery,
+        matchedCount: indexedLogSearch?.matched ?? 0,
+        rows: indexedLogSearch?.rows.map((site) => this.serializeIndexedLog(site)) ?? [],
+        truncated: indexedLogSearch?.truncated ?? false
+      },
       selectedId: this.selectedId,
       notice: this.notice
     };
@@ -367,13 +472,31 @@ class LogcatSourceController implements vscode.Disposable {
     };
   }
 
+  private serializeIndexedLog(site: SourceLogSite): PanelIndexedLogRow {
+    return {
+      id: site.id,
+      relativePath: site.relativePath,
+      line: site.line,
+      functionName: site.functionName,
+      api: site.api,
+      level: site.level,
+      tag: site.tag,
+      template: site.template.preview,
+      sourcePreview: site.sourcePreview
+    };
+  }
+
   private postState(): void {
     this.viewProvider.postState(this.getPanelState());
   }
 
   private async navigateToCandidate(candidate: MatchCandidate): Promise<void> {
-    const position = new vscode.Position(Math.max(0, candidate.site.line - 1), candidate.site.column);
-    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(candidate.site.filePath));
+    await this.navigateToSite(candidate.site);
+  }
+
+  private async navigateToSite(site: SourceLogSite): Promise<void> {
+    const position = new vscode.Position(Math.max(0, site.line - 1), site.column);
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(site.filePath));
     const line = document.lineAt(position.line);
     const range = new vscode.Range(position, line.range.end);
     this.clearDecoration();
@@ -408,6 +531,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       webviewOptions: { retainContextWhenHidden: true }
     }),
     vscode.commands.registerCommand('logcatSourceNavigator.focus', () => controller.focus()),
+    vscode.commands.registerCommand('logcatSourceNavigator.browseIndexedLogs', () => controller.browseIndexedLogs()),
     vscode.commands.registerCommand('logcatSourceNavigator.indexSources', () => controller.indexSources()),
     vscode.commands.registerCommand('logcatSourceNavigator.loadLogcat', () => controller.loadLogcat()),
     vscode.commands.registerCommand('logcatSourceNavigator.clearSession', () => controller.clearSession()),

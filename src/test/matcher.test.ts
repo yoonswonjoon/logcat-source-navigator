@@ -55,3 +55,31 @@ test('does not map a matching message when tag or level differ', () => {
   assert.equal(matchLogcatEvents([event('state changed', 'Other')], sites)[0].status, 'unmatched');
   assert.equal(matchLogcatEvents([event('state changed', 'Demo', 'I')], sites)[0].status, 'unmatched');
 });
+
+test('keeps ordered exact-tag matches and falls back to unresolved tags only after they miss', () => {
+  const source = [
+    'class Example {',
+    '  static final String TAG = "Demo";',
+    '  void first() { Slog.w(TAG, "same value"); }',
+    '  void anotherTag() { Slog.w("Other", "same value"); }',
+    '  void second() { Slog.w(TAG, "same value"); }',
+    '  void dynamic(String runtimeTag) { Slog.w(runtimeTag, "fallback value"); }',
+    '  void wrongExactTag() { Slog.w(TAG, "not the fallback"); }',
+    '}'
+  ].join('\n');
+  const sites = extractLogSitesFromSource(source, '/tmp/Example.java', 'Example.java');
+
+  const [exact, fallback] = matchLogcatEvents(
+    [event('same value'), event('fallback value')],
+    sites
+  );
+
+  assert.deepEqual(
+    exact.candidates.map((candidate) => candidate.site.functionName),
+    ['first', 'second']
+  );
+  assert.equal(fallback.status, 'exact');
+  assert.equal(fallback.candidates.length, 1);
+  assert.equal(fallback.candidates[0].site.functionName, 'dynamic');
+  assert.deepEqual(fallback.candidates[0].reason, ['unresolved source tag', 'same level', 'literal message']);
+});

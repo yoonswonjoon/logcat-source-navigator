@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { searchSourceLogSites } from '../core/indexSearch';
 import { extractLogSitesFromSource } from '../core/sourceIndexer';
 
 test('indexes Java Log calls with a local TAG constant and containing function', () => {
@@ -119,4 +120,43 @@ test('supports explicit argument indices for non-standard custom logger wrapper 
   assert.equal(site.tag, 'AuditDemo');
   assert.equal(site.level, 'E');
   assert.equal(site.template.preview, 'audit failed: {value}');
+});
+
+test('searches indexed log sites case-insensitively across paths, functions, tags, and messages', () => {
+  const source = [
+    'class Example {',
+    '  static final String TAG = "AudioService";',
+    '  void recover(String reason) { Slog.w(TAG, "restart failed: " + reason); }',
+    '  void report() { Log.i(TAG, "started"); }',
+    '}'
+  ].join('\n');
+  const sites = extractLogSitesFromSource(source, '/tmp/services/Audio.java', 'services/Audio.java');
+
+  const result = searchSourceLogSites(sites, 'audioservice RESTART');
+
+  assert.equal(result.total, 2);
+  assert.equal(result.matched, 1);
+  assert.equal(result.truncated, false);
+  assert.equal(result.rows[0].functionName, 'recover');
+});
+
+test('limits index-browser rows while retaining the complete match count', () => {
+  const source = [
+    'class Example {',
+    '  static final String TAG = "Demo";',
+    '  void first() { Log.d(TAG, "first"); }',
+    '  void second() { Log.d(TAG, "second"); }',
+    '  void third() { Log.d(TAG, "third"); }',
+    '}'
+  ].join('\n');
+  const sites = extractLogSitesFromSource(source, '/tmp/Example.java', 'Example.java');
+
+  const result = searchSourceLogSites(sites, undefined, 2);
+
+  assert.equal(result.total, 3);
+  assert.equal(result.matched, 3);
+  assert.equal(result.rows.length, 2);
+  assert.equal(result.rows[0].functionName, 'first');
+  assert.equal(result.rows[1].functionName, 'second');
+  assert.equal(result.truncated, true);
 });
