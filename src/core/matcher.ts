@@ -34,21 +34,76 @@ function siteMatchesEvent(site: SourceLogSite, event: LogcatEvent, tagIsExact: b
   return { site, score, reason };
 }
 
-function candidatesForEvent(event: LogcatEvent, sites: SourceLogSite[]): MatchCandidate[] {
-  const sameLevel = sites.filter((site) => site.level === event.level);
-  const exactTag = sameLevel
-    .filter((site) => site.tag === event.tag)
-    .map((site) => siteMatchesEvent(site, event, true))
-    .filter((candidate): candidate is MatchCandidate => candidate !== undefined);
+interface MatcherSiteIndex {
+  /** Sites with a statically resolved source tag, grouped by level and tag. */
+  readonly resolvedTagsByLevel: Map<LogLevel, Map<string, SourceLogSite[]>>;
+  /** Sites whose source tag cannot be resolved statically, grouped by level. */
+  readonly unresolvedTagsByLevel: Map<LogLevel, SourceLogSite[]>;
+}
+
+/**
+ * Builds the lookup tables once per logcat mapping operation.
+ *
+ * Each bucket appends sites in the input order. This matters because candidates
+ * with equal scores keep their source-index order after the stable score sort.
+ */
+function buildMatcherSiteIndex(sites: readonly SourceLogSite[]): MatcherSiteIndex {
+  const resolvedTagsByLevel = new Map<LogLevel, Map<string, SourceLogSite[]>>();
+  const unresolvedTagsByLevel = new Map<LogLevel, SourceLogSite[]>();
+
+  for (const site of sites) {
+    if (site.tag === undefined) {
+      const unresolved = unresolvedTagsByLevel.get(site.level);
+      if (unresolved) {
+        unresolved.push(site);
+      } else {
+        unresolvedTagsByLevel.set(site.level, [site]);
+      }
+      continue;
+    }
+
+    let tagsForLevel = resolvedTagsByLevel.get(site.level);
+    if (!tagsForLevel) {
+      tagsForLevel = new Map<string, SourceLogSite[]>();
+      resolvedTagsByLevel.set(site.level, tagsForLevel);
+    }
+
+    const resolved = tagsForLevel.get(site.tag);
+    if (resolved) {
+      resolved.push(site);
+    } else {
+      tagsForLevel.set(site.tag, [site]);
+    }
+  }
+
+  return { resolvedTagsByLevel, unresolvedTagsByLevel };
+}
+
+function matchingCandidates(
+  event: LogcatEvent,
+  sites: readonly SourceLogSite[],
+  tagIsExact: boolean
+): MatchCandidate[] {
+  const candidates: MatchCandidate[] = [];
+  for (const site of sites) {
+    const candidate = siteMatchesEvent(site, event, tagIsExact);
+    if (candidate) candidates.push(candidate);
+  }
+  return candidates;
+}
+
+function candidatesForEvent(event: LogcatEvent, siteIndex: MatcherSiteIndex): MatchCandidate[] {
+  const exactTag = matchingCandidates(
+    event,
+    siteIndex.resolvedTagsByLevel.get(event.level)?.get(event.tag) ?? [],
+    true
+  );
 
   if (exactTag.length > 0) {
     return exactTag;
   }
 
-  return sameLevel
-    .filter((site) => site.tag === undefined)
-    .map((site) => siteMatchesEvent(site, event, false))
-    .filter((candidate): candidate is MatchCandidate => candidate !== undefined);
+  return matchingCandidates(event, siteIndex.unresolvedTagsByLevel.get(event.level) ?? [], false);
 }
 
 function statusFor(candidates: MatchCandidate[]): MatchStatus {
@@ -61,8 +116,9 @@ function statusFor(candidates: MatchCandidate[]): MatchStatus {
 }
 
 export function matchLogcatEvents(events: LogcatEvent[], sites: SourceLogSite[]): MappedLogEvent[] {
+  const siteIndex = buildMatcherSiteIndex(sites);
   return events.map((event) => {
-    const candidates = candidatesForEvent(event, sites).sort((left, right) => right.score - left.score);
+    const candidates = candidatesForEvent(event, siteIndex).sort((left, right) => right.score - left.score);
     return {
       event,
       status: statusFor(candidates),

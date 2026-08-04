@@ -1,8 +1,8 @@
 {
   "name": "logcat-source-navigator",
   "displayName": "Logcat Source Navigator",
-  "description": "Map Android logcat rows to Log, Slog, and ALOG source locations.",
-  "version": "0.2.0",
+  "description": "Map Android logcat rows and browse indexed logging call sites.",
+  "version": "0.3.0",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -29,6 +29,7 @@
   "activationEvents": [
     "onView:logcatSourceNavigator.logView",
     "onCommand:logcatSourceNavigator.focus",
+    "onCommand:logcatSourceNavigator.browseIndexedLogs",
     "onCommand:logcatSourceNavigator.indexSources",
     "onCommand:logcatSourceNavigator.loadLogcat",
     "onCommand:logcatSourceNavigator.clearSession",
@@ -40,6 +41,11 @@
       {
         "command": "logcatSourceNavigator.focus",
         "title": "Open Logcat Source",
+        "category": "Logcat Source"
+      },
+      {
+        "command": "logcatSourceNavigator.browseIndexedLogs",
+        "title": "Browse Indexed Logging Calls",
         "category": "Logcat Source"
       },
       {
@@ -101,9 +107,14 @@
           "group": "navigation@2"
         },
         {
-          "command": "logcatSourceNavigator.clearSession",
+          "command": "logcatSourceNavigator.browseIndexedLogs",
           "when": "view == logcatSourceNavigator.logView",
           "group": "navigation@3"
+        },
+        {
+          "command": "logcatSourceNavigator.clearSession",
+          "when": "view == logcatSourceNavigator.logView",
+          "group": "navigation@4"
         }
       ]
     },

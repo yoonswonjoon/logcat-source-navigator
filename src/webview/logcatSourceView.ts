@@ -21,6 +21,38 @@ export interface PanelLogRow {
   candidates: PanelCandidate[];
 }
 
+/** A compact, serializable view of one call site in the saved source index. */
+export interface PanelIndexedLogRow {
+  id: string;
+  relativePath: string;
+  line: number;
+  functionName?: string;
+  api: string;
+  level: string;
+  tag?: string;
+  template: string;
+  sourcePreview: string;
+}
+
+/**
+ * The complete source index can contain tens of thousands of call sites.
+ * Only a capped search result is sent to the webview at a time.
+ */
+export interface PanelIndexedLogs {
+  visible: boolean;
+  query: string;
+  matchedCount: number;
+  rows: PanelIndexedLogRow[];
+  truncated: boolean;
+}
+
+/** The inclusive source-log line interval currently used for matching. */
+export interface PanelLineRange {
+  totalLineCount: number;
+  startLine: number;
+  endLine: number;
+}
+
 export interface PanelFilters {
   /** `undefined` means every ID is enabled; an empty array means none are enabled. */
   pids?: number[];
@@ -37,10 +69,14 @@ export interface PanelState {
   loadedLogcatName?: string;
   totalEventCount: number;
   displayedEventCount: number;
+  renderedEventCount: number;
+  logRowsTruncated: boolean;
+  lineRange: PanelLineRange;
   pids: number[];
   tids: number[];
   filters: PanelFilters;
   rows: PanelLogRow[];
+  indexedLogs: PanelIndexedLogs;
   selectedId?: string;
   notice?: string;
 }
@@ -53,10 +89,14 @@ export type PanelMessage =
   | { type: 'loadLogcatText'; name: string; text: string }
   | { type: 'loadLogcatError'; message: string }
   | { type: 'clearSession' }
+  | { type: 'applyLineRange'; startLine: number; endLine: number }
+  | { type: 'toggleIndexedLogs' }
+  | { type: 'filterIndexedLogs'; query: string }
   | { type: 'filter'; filters: PanelFilters }
   | { type: 'select'; id: string }
   | { type: 'navigate'; delta: number }
-  | { type: 'openCandidate'; eventId: string; candidateId: string };
+  | { type: 'openCandidate'; eventId: string; candidateId: string }
+  | { type: 'openIndexedLog'; id: string };
 
 export class LogcatSourceViewProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
@@ -108,7 +148,7 @@ function getHtml(webview: vscode.Webview): string {
     .drop-zone { border: 1px dashed var(--vscode-panel-border); padding: 14px; text-align: center; color: var(--vscode-descriptionForeground); }
     .drop-zone.is-over { background: var(--vscode-list-hoverBackground); }
     .filter-group { display: flex; align-items: center; gap: 4px; }
-    select, input[type="search"] { color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); padding: 4px 6px; }
+    select, input[type="search"], input[type="number"] { color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); padding: 4px 6px; }
     input[type="search"] { min-width: 160px; }
     .id-filter { position: relative; }
     .id-filter > summary { list-style: none; cursor: pointer; color: var(--vscode-input-foreground); background: var(--vscode-input-background); border: 1px solid var(--vscode-input-border, transparent); padding: 4px 7px; white-space: nowrap; }
@@ -124,6 +164,9 @@ function getHtml(webview: vscode.Webview): string {
     .level { color: var(--vscode-foreground); background: var(--vscode-button-secondaryBackground); padding: 3px 6px; }
     .level.is-on { color: var(--vscode-button-foreground); background: var(--vscode-button-background); }
     .summary { justify-content: space-between; border-top: 1px solid var(--vscode-panel-border); padding-top: 8px; }
+    .line-range { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .line-range input[type="number"] { width: 8.5em; }
+    .line-range button { padding: 4px 7px; }
     #log-list { outline: none; border: 1px solid var(--vscode-panel-border); max-height: 520px; overflow: auto; }
     .row { box-sizing: border-box; display: grid; grid-template-columns: minmax(135px, 1fr) minmax(72px, .5fr) 24px minmax(110px, .75fr) minmax(180px, 2.2fr) minmax(94px, .65fr); gap: 8px; width: 100%; text-align: left; color: var(--vscode-foreground); background: transparent; border-radius: 0; border-bottom: 1px solid var(--vscode-panel-border); padding: 7px 8px; }
     .row:hover { background: var(--vscode-list-hoverBackground); }
@@ -140,9 +183,22 @@ function getHtml(webview: vscode.Webview): string {
     .candidate:first-of-type { border-top: 0; }
     .candidate-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .empty { justify-content: center; min-height: 100px; color: var(--vscode-descriptionForeground); text-align: center; }
+    #indexed-logs { display: grid; gap: 8px; border-top: 1px solid var(--vscode-panel-border); padding-top: 8px; }
+    .indexed-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+    .indexed-search { display: flex; gap: 6px; }
+    .indexed-search input { box-sizing: border-box; width: 100%; }
+    #indexed-log-list { outline: none; border: 1px solid var(--vscode-panel-border); max-height: 520px; overflow: auto; }
+    .indexed-columns, .indexed-row { display: grid; grid-template-columns: 28px minmax(82px, .62fr) minmax(90px, .7fr) minmax(160px, 1.5fr) minmax(140px, 1.2fr) minmax(180px, 2.1fr); gap: 8px; }
+    .indexed-columns { color: var(--vscode-descriptionForeground); font-size: .82em; padding: 0 8px; }
+    .indexed-row { box-sizing: border-box; width: 100%; text-align: left; color: var(--vscode-foreground); background: transparent; border-radius: 0; border-bottom: 1px solid var(--vscode-panel-border); padding: 7px 8px; }
+    .indexed-row:hover { background: var(--vscode-list-hoverBackground); }
+    .indexed-row .indexed-template, .indexed-row .indexed-source { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .indexed-level { font-weight: 700; }
     @media (max-width: 760px) {
       .row { grid-template-columns: minmax(120px, 1fr) 24px minmax(120px, 1fr); }
       .row .pid, .row .tag, .row .status { display: none; }
+      .indexed-columns, .indexed-row { grid-template-columns: 28px minmax(80px, .8fr) minmax(120px, 1.4fr) minmax(150px, 1.8fr); }
+      .indexed-columns .indexed-api, .indexed-columns .indexed-function, .indexed-row .indexed-api, .indexed-row .indexed-function { display: none; }
     }
   </style>
 </head>
@@ -156,6 +212,7 @@ function getHtml(webview: vscode.Webview): string {
       <div class="toolbar-actions">
         <button id="index-button" class="secondary" type="button">Index Source Folder</button>
         <button id="load-button" type="button">Attach Logcat / .log</button>
+        <button id="browse-index-button" class="secondary" type="button">Browse Indexed Logs</button>
         <button id="clear-button" class="secondary" type="button">Clear</button>
       </div>
     </div>
@@ -165,9 +222,26 @@ function getHtml(webview: vscode.Webview): string {
     </div>
 
     <section id="filters" class="filters" aria-label="Log filters"></section>
+    <section id="line-range" class="line-range" aria-label="Logcat line range">
+      <span class="hint">Map input lines</span>
+      <label>From <input id="line-range-start" type="number" min="1" inputmode="numeric" /></label>
+      <label>To <input id="line-range-end" type="number" min="1" inputmode="numeric" /></label>
+      <button id="apply-line-range" class="secondary" type="button">Map range</button>
+      <button id="all-line-range" class="secondary" type="button">All lines</button>
+      <span id="line-range-status" class="hint"></span>
+    </section>
     <div id="summary" class="summary"></div>
     <div id="log-list" role="listbox" tabindex="0" aria-label="Mapped logcat rows"></div>
     <section id="candidates" hidden aria-label="Source candidates"></section>
+    <section id="indexed-logs" hidden aria-label="Indexed logging calls">
+      <div class="indexed-heading">
+        <strong>INDEXED LOGGING CALLS</strong>
+        <span id="indexed-log-summary" class="hint"></span>
+      </div>
+      <label class="indexed-search"><input id="indexed-log-query" type="search" placeholder="Search path, function, tag, or message" /></label>
+      <div class="indexed-columns" aria-hidden="true"><span>LV</span><span class="indexed-api">API</span><span>TAG</span><span>FILE:LINE</span><span class="indexed-function">FUNCTION</span><span>MESSAGE TEMPLATE</span></div>
+      <div id="indexed-log-list" role="listbox" tabindex="0" aria-label="Indexed logging calls"></div>
+    </section>
   </main>
 
   <script nonce="${nonce}">
@@ -175,6 +249,7 @@ function getHtml(webview: vscode.Webview): string {
     const LEVELS = ['V', 'D', 'I', 'W', 'E', 'F'];
     let state = undefined;
     let queryTimer = undefined;
+    let indexedQueryTimer = undefined;
     const openIdFilters = { pid: false, tid: false };
 
     const byId = (id) => document.getElementById(id);
@@ -255,6 +330,37 @@ function getHtml(webview: vscode.Webview): string {
         post('filter', { filters: currentFilters() });
       }));
     }
+    function renderLineRange() {
+      const range = state.lineRange;
+      const hasLogcat = range.totalLineCount > 0;
+      const start = byId('line-range-start');
+      const end = byId('line-range-end');
+      const apply = byId('apply-line-range');
+      const all = byId('all-line-range');
+      start.disabled = !hasLogcat;
+      end.disabled = !hasLogcat;
+      apply.disabled = !hasLogcat;
+      all.disabled = !hasLogcat;
+      start.max = String(range.totalLineCount || 1);
+      end.max = String(range.totalLineCount || 1);
+      if (hasLogcat) {
+        start.value = String(range.startLine);
+        end.value = String(range.endLine);
+        byId('line-range-status').textContent = range.startLine + '–' + range.endLine + ' / ' + range.totalLineCount + ' lines';
+      } else {
+        start.value = '';
+        end.value = '';
+        byId('line-range-status').textContent = 'Load a logcat to choose a range.';
+      }
+    }
+    function applyLineRange() {
+      const range = state.lineRange;
+      if (!range.totalLineCount) return;
+      post('applyLineRange', {
+        startLine: Number(byId('line-range-start').value),
+        endLine: Number(byId('line-range-end').value)
+      });
+    }
     function renderRows() {
       const list = byId('log-list');
       if (!state.rows.length) {
@@ -288,21 +394,72 @@ function getHtml(webview: vscode.Webview): string {
       ).join('');
       panel.querySelectorAll('[data-candidate]').forEach((button) => button.addEventListener('click', () => post('openCandidate', { eventId: selected.id, candidateId: button.dataset.candidate })));
     }
+    function renderIndexedLogs() {
+      const browser = state.indexedLogs;
+      const panel = byId('indexed-logs');
+      panel.hidden = !browser.visible;
+      if (!browser.visible) return;
+
+      const query = byId('indexed-log-query');
+      if (query.value !== browser.query) query.value = browser.query;
+      const shownText = browser.truncated
+        ? 'Showing first ' + browser.rows.length + ' of ' + browser.matchedCount + ' matches'
+        : browser.rows.length + ' of ' + browser.matchedCount + ' matches';
+      byId('indexed-log-summary').textContent = shownText + ' (' + state.sourceSiteCount + ' indexed)';
+
+      const list = byId('indexed-log-list');
+      if (!browser.rows.length) {
+        list.innerHTML = '<div class="empty">' + (state.sourceSiteCount
+          ? 'No indexed logging calls match this search.'
+          : 'Index a source folder to browse its logging calls.') + '</div>';
+        return;
+      }
+      list.innerHTML = browser.rows.map((row) =>
+        '<button class="indexed-row" role="option" type="button" data-indexed-log-id="' + escapeHtml(row.id) + '" title="' + escapeHtml(row.sourcePreview) + '">' +
+          '<span class="indexed-level">[' + escapeHtml(row.level) + ']</span>' +
+          '<span class="indexed-api">' + escapeHtml(row.api) + '</span>' +
+          '<span class="indexed-tag">' + escapeHtml(row.tag || '(no tag)') + '</span>' +
+          '<span class="indexed-location">' + escapeHtml(row.relativePath + ':' + row.line) + '</span>' +
+          '<span class="indexed-function">' + escapeHtml(row.functionName || '-') + '</span>' +
+          '<span class="indexed-template">' + escapeHtml(row.template || row.sourcePreview) + '</span>' +
+        '</button>'
+      ).join('');
+      list.querySelectorAll('[data-indexed-log-id]').forEach((row) => row.addEventListener('click', () => post('openIndexedLog', { id: row.dataset.indexedLogId })));
+    }
     function render(nextState) {
       const active = document.activeElement;
       const restoreLogFocus = active === byId('log-list') || (active && active.classList && active.classList.contains('row'));
+      const restoreIndexedQueryFocus = active === byId('indexed-log-query');
+      const indexedQuerySelection = restoreIndexedQueryFocus
+        ? { start: active.selectionStart, end: active.selectionEnd }
+        : undefined;
       const previousSelectedId = state && state.selectedId;
       state = nextState;
+      const browsingIndexedLogs = state.indexedLogs.visible;
       byId('metadata').textContent = state.sourceSiteCount + ' source logs / ' + state.totalEventCount + ' events';
-      byId('summary').innerHTML = '<span>' + state.displayedEventCount + ' visible events</span><span class="hint">' + escapeHtml(state.notice || (state.loadedLogcatName ? state.loadedLogcatName : 'No logcat loaded')) + '</span>';
-      renderFilters();
-      renderRows();
-      renderCandidates();
-      if (state.selectedId && state.selectedId !== previousSelectedId) {
-        const selectedRow = byId('log-list').querySelector('.row.is-selected');
-        selectedRow?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      const visibleEventText = state.logRowsTruncated
+        ? 'Showing first ' + state.renderedEventCount + ' of ' + state.displayedEventCount + ' visible events — narrow Map input lines or filters'
+        : state.displayedEventCount + ' visible events';
+      byId('summary').innerHTML = '<span>' + visibleEventText + '</span><span class="hint">' + escapeHtml(state.notice || (state.loadedLogcatName ? state.loadedLogcatName : 'No logcat loaded')) + '</span>';
+      byId('browse-index-button').textContent = browsingIndexedLogs ? 'Back to Logcat' : 'Browse Indexed Logs';
+      ['drop-zone', 'filters', 'line-range', 'summary', 'log-list', 'candidates'].forEach((id) => { byId(id).hidden = browsingIndexedLogs; });
+      if (!browsingIndexedLogs) {
+        renderFilters();
+        renderLineRange();
+        renderRows();
+        renderCandidates();
+        if (state.selectedId && state.selectedId !== previousSelectedId) {
+          const selectedRow = byId('log-list').querySelector('.row.is-selected');
+          selectedRow?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        }
       }
+      renderIndexedLogs();
       if (restoreLogFocus) byId('log-list').focus();
+      if (restoreIndexedQueryFocus) {
+        const query = byId('indexed-log-query');
+        query.focus();
+        if (indexedQuerySelection) query.setSelectionRange(indexedQuerySelection.start, indexedQuerySelection.end);
+      }
     }
     function reportDroppedLogcatError(message) {
       post('loadLogcatError', { message });
@@ -363,7 +520,23 @@ function getHtml(webview: vscode.Webview): string {
     }
     byId('index-button').addEventListener('click', () => post('indexSources'));
     byId('load-button').addEventListener('click', () => post('loadLogcat'));
+    byId('browse-index-button').addEventListener('click', () => post('toggleIndexedLogs'));
     byId('clear-button').addEventListener('click', () => post('clearSession'));
+    byId('indexed-log-query').addEventListener('input', () => {
+      clearTimeout(indexedQueryTimer);
+      indexedQueryTimer = setTimeout(() => post('filterIndexedLogs', { query: byId('indexed-log-query').value }), 180);
+    });
+    byId('apply-line-range').addEventListener('click', () => applyLineRange());
+    byId('all-line-range').addEventListener('click', () => {
+      if (!state || !state.lineRange.totalLineCount) return;
+      post('applyLineRange', { startLine: 1, endLine: state.lineRange.totalLineCount });
+    });
+    ['line-range-start', 'line-range-end'].forEach((id) => byId(id).addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        applyLineRange();
+      }
+    }));
     const dropZone = byId('drop-zone');
     let dragDepth = 0;
     dropZone.addEventListener('dragenter', (event) => {

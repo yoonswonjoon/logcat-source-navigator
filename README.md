@@ -8,6 +8,8 @@ A VS Code extension MVP for Android framework work. It indexes `Log.*`, `Slog.*`
 - Indexes configured Java/Kotlin logging facades such as `L.e(...)` and `L.w(...)`.
 - Parses Android Studio JSON logcat exports, `adb logcat -v threadtime`, and brief-format logs.
 - Filters by one or more PID/TID values, level, and free-text query.
+- Lets you browse the saved logging-call index directly, with search by path, function, tag, or message.
+- Lets you choose the input-line range to map for large logcat files.
 - Shows `exact`, `pattern`, `ambiguous`, and `unmatched` mapping states.
 - Keeps ambiguous source locations as explicit candidates instead of guessing.
 - Opens and highlights the source line as log rows are selected.
@@ -30,11 +32,18 @@ Download the latest `.vsix` from the [GitHub Releases page](https://github.com/y
 3. Run **Logcat Source: Open Logcat Source** from the Command Palette. This opens the bottom panel.
 4. Select **Index Source Folder** and choose the Android module or framework source directory to inspect. The extension indexes log *call sites* rather than every source line.
 5. Select **Attach Logcat / .log** (or drag a file onto the panel) and choose a supported input: Android Studio JSON export (`.logcat` / `.json`), `.log` / `.txt` threadtime export, or brief-format text. The button uses VS Code's native file picker if the operating system blocks a drag-and-drop.
-6. Narrow the loaded rows with PID, TID, log level, or text search. Open the PID/TID control to select multiple values; **All** enables every value and **None** disables every value. PID and TID selections are combined with AND semantics.
-7. Click an exact/pattern row to open and highlight its source line. When the row has multiple candidates, choose one under **Source candidates**; the extension does not guess.
-8. Keep focus in the log list and use `Up`/`Down` to select rows or `Left`/`Right` to move between automatically mappable logs while the code editor follows. The list scrolls to keep the newly selected row visible.
+6. For a large file, set **Map input lines** → **From** and **To**, then select **Map range**. Only events whose log header falls in that inclusive range are matched. Files over 10,000 lines start with the newest 10,000 lines selected, so the panel stays responsive; choose **All lines** only when you intentionally want to map the entire file. If more than 2,000 filtered rows remain, the panel shows the first 2,000 and asks you to narrow the range or filters before navigating further.
+7. Narrow the loaded rows with PID, TID, log level, or text search. Open the PID/TID control to select multiple values; **All** enables every value and **None** disables every value. PID and TID selections are combined with AND semantics.
+8. Click an exact/pattern row to open and highlight its source line. When the row has multiple candidates, choose one under **Source candidates**; the extension does not guess.
+9. Keep focus in the log list and use `Up`/`Down` to select rows or `Left`/`Right` to move between automatically mappable logs while the code editor follows. The list scrolls to keep the newly selected row visible.
 
 Run **Index Source Folder** again after changing source logging calls. **Clear** removes only the loaded logcat; the cached source index remains.
+
+## Browse indexed logging calls
+
+Select **Browse Indexed Logs** in the panel (or run **Logcat Source: Browse Indexed Logging Calls** from the Command Palette) after indexing. This view does not need a loaded logcat: it shows the source call sites currently stored in the index. Search by source path, containing function, log tag, level/API, or message template, then select a row to open and highlight that source line.
+
+To keep a framework-scale index responsive, the browser renders at most 500 matching call sites at once and tells you when the result is truncated. Add search text to narrow it further.
 
 If the panel was moved or hidden by VS Code, run **View: Reset View Locations**, then run **Logcat Source: Open Logcat Source** again.
 

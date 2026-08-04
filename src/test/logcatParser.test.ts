@@ -1,5 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {
+  DEFAULT_LOG_MAPPING_LINE_LIMIT,
+  countLogTextLines,
+  defaultLogMappingRange,
+  filterLogcatEventsByLineRange,
+  normalizeLogLineRange
+} from '../core/logRange';
 import { availablePids, parseLogcat } from '../core/logcatParser';
 
 test('parses threadtime and brief logcat formats and groups continuation lines', () => {
@@ -73,4 +80,54 @@ test('parses Android Studio JSON logcat exports', () => {
   assert.deepEqual(events[0].rawLines, ['connect failed: timeout', 'java.lang.IllegalStateException: sample']);
   assert.equal(events[1].level, 'F');
   assert.deepEqual(availablePids(events), [99, 22745]);
+});
+
+test('counts physical text lines while ignoring a final newline', () => {
+  assert.equal(countLogTextLines(''), 0);
+  assert.equal(countLogTextLines('one'), 1);
+  assert.equal(countLogTextLines('one\n'), 1);
+  assert.equal(countLogTextLines('one\r\ntwo\rthree'), 2);
+  assert.equal(countLogTextLines('\n\n'), 2);
+});
+
+test('normalizes requested log line ranges to a one-based inclusive selection', () => {
+  assert.deepEqual(normalizeLogLineRange(100, { startLine: ' 9 ', endLine: 12.8 }), {
+    startLine: 9,
+    endLine: 12
+  });
+  assert.deepEqual(normalizeLogLineRange(100, { startLine: -3, endLine: 4 }), {
+    startLine: 1,
+    endLine: 4
+  });
+  assert.deepEqual(normalizeLogLineRange(100, { startLine: 120, endLine: 8 }), {
+    startLine: 8,
+    endLine: 100
+  });
+  assert.deepEqual(normalizeLogLineRange(12, { startLine: 'not a line', endLine: '' }), {
+    startLine: 1,
+    endLine: 12
+  });
+  assert.equal(normalizeLogLineRange(0, { startLine: 1, endLine: 1 }), undefined);
+});
+
+test('uses the newest 10,000 lines as the safe default mapping range', () => {
+  assert.equal(DEFAULT_LOG_MAPPING_LINE_LIMIT, 10_000);
+  assert.deepEqual(defaultLogMappingRange(87), { startLine: 1, endLine: 87 });
+  assert.deepEqual(defaultLogMappingRange(15_020), { startLine: 5_021, endLine: 15_020 });
+  assert.deepEqual(defaultLogMappingRange(15_020, 200), { startLine: 14_821, endLine: 15_020 });
+  assert.equal(defaultLogMappingRange(0), undefined);
+});
+
+test('filters parsed logcat events using their header input line', () => {
+  const events = parseLogcat([
+    '01-10 12:00:01.123  1048  1204 I DemoService: first',
+    'stack trace continuation',
+    '01-10 12:00:02.123  1048  1204 W DemoService: second',
+    '01-10 12:00:03.123  1048  1204 E DemoService: third'
+  ].join('\n'));
+
+  const selected = filterLogcatEventsByLineRange(events, { startLine: 2, endLine: 3 });
+  assert.deepEqual(selected.map((event) => event.message), ['second']);
+  assert.deepEqual(selected.map((event) => event.inputStartLine), [3]);
+  assert.deepEqual(filterLogcatEventsByLineRange(events, undefined), []);
 });
