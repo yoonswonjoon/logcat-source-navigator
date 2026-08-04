@@ -5,6 +5,7 @@ A VS Code extension MVP for Android framework work. It indexes `Log.*`, `Slog.*`
 ## What it does
 
 - Indexes Java, Kotlin, C, and C++ source files without modifying the source tree.
+- Indexes configured Java/Kotlin logging facades such as `L.e(...)` and `L.w(...)`.
 - Parses Android Studio JSON logcat exports, `adb logcat -v threadtime`, and brief-format logs.
 - Filters by one or more PID/TID values, level, and free-text query.
 - Shows `exact`, `pattern`, `ambiguous`, and `unmatched` mapping states.
@@ -28,7 +29,7 @@ Download the latest `.vsix` from the [GitHub Releases page](https://github.com/y
 2. Select the downloaded VSIX, then run **Developer: Reload Window**.
 3. Run **Logcat Source: Open Logcat Source** from the Command Palette. This opens the bottom panel.
 4. Select **Index Source Folder** and choose the Android module or framework source directory to inspect. The extension indexes log *call sites* rather than every source line.
-5. Select **Load Logcat** (or drag a file onto the panel) and choose a supported input: Android Studio JSON export (`.logcat` / `.json`), `adb logcat -v threadtime`, or brief-format text.
+5. Select **Attach Logcat / .log** (or drag a file onto the panel) and choose a supported input: Android Studio JSON export (`.logcat` / `.json`), `.log` / `.txt` threadtime export, or brief-format text. The button uses VS Code's native file picker if the operating system blocks a drag-and-drop.
 6. Narrow the loaded rows with PID, TID, log level, or text search. Open the PID/TID control to select multiple values; **All** enables every value and **None** disables every value. PID and TID selections are combined with AND semantics.
 7. Click an exact/pattern row to open and highlight its source line. When the row has multiple candidates, choose one under **Source candidates**; the extension does not guess.
 8. Keep focus in the log list and use `Up`/`Down` to select rows or `Left`/`Right` to move between automatically mappable logs while the code editor follows. The list scrolls to keep the newly selected row visible.
@@ -37,12 +38,40 @@ Run **Index Source Folder** again after changing source logging calls. **Clear**
 
 If the panel was moved or hidden by VS Code, run **View: Reset View Locations**, then run **Logcat Source: Open Logcat Source** again.
 
+## Custom logger facades
+
+Add your project's wrapper in VS Code Settings JSON, then run **Index Source Folder** again.
+
+```json
+{
+  "logcatSourceNavigator.customLoggers": [
+    { "receiver": "L" }
+  ]
+}
+```
+
+The simple form recognizes `L.v/d/i/w/e/wtf(message)`, `L.e(message, throwable)`, and `L.e(TAG, message[, throwable])`. For an uncommon method signature, specify the zero-based tag and message argument positions:
+
+```json
+{
+  "logcatSourceNavigator.customLoggers": [
+    {
+      "receiver": "Audit",
+      "tagArgumentIndex": 1,
+      "messageArgumentIndex": 2
+    }
+  ]
+}
+```
+
+For example, this indexes `Audit.e(error, TAG, "message")`.
+
 ## Local development
 
 For local development, use the same flow after opening the bottom panel:
 
 1. Select **Index Source Folder** and choose your Android module folder.
-2. Select **Load Logcat File** and load an Android Studio JSON export or a `threadtime` logcat file.
+2. Select **Attach Logcat / .log** and load an Android Studio JSON export, `.log` export, or `threadtime` logcat file.
 3. Select rows or use the panel's arrow-key navigation to follow mapped source lines.
 
 Use `adb logcat -v threadtime -d > logcat.txt` for the most useful input format.

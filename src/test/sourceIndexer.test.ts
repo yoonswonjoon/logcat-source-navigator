@@ -73,3 +73,50 @@ test('understands Kotlin interpolation and String.format message templates', () 
   assert.equal(sites[0].template.preview, 'uid={value} failed');
   assert.equal(sites[1].template.preview, 'retry {value}');
 });
+
+test('indexes configured L facade calls with common one- and two-argument wrapper signatures', () => {
+  const source = [
+    'class Example {',
+    '  private static final String TAG = "FacadeDemo";',
+    '  void report(String reason, Throwable error) {',
+    '    L.v("verbose");',
+    '    L.d(TAG, "debug: " + reason);',
+    '    L.i("info");',
+    '    L.w("retrying", error);',
+    '    L.e(TAG, "failed: " + reason, error);',
+    '    L.wtf("fatal");',
+    '  }',
+    '}'
+  ].join('\n');
+
+  const sites = extractLogSitesFromSource(source, '/tmp/Example.java', 'Example.java', {
+    customLoggers: [{ receiver: 'L' }]
+  });
+
+  assert.deepEqual(sites.map((site) => site.level), ['V', 'D', 'I', 'W', 'E', 'F']);
+  assert.ok(sites.every((site) => site.api === 'Custom'));
+  assert.equal(sites[1].tag, 'FacadeDemo');
+  assert.equal(sites[3].tag, undefined);
+  assert.equal(sites[4].template.preview, 'failed: {value}');
+  assert.equal(sites[5].functionName, 'report');
+});
+
+test('supports explicit argument indices for non-standard custom logger wrapper signatures', () => {
+  const source = [
+    'class Example {',
+    '  private static final String TAG = "AuditDemo";',
+    '  void report(Throwable error, String reason) {',
+    '    Audit.e(error, TAG, "audit failed: " + reason);',
+    '  }',
+    '}'
+  ].join('\n');
+
+  const [site] = extractLogSitesFromSource(source, '/tmp/Example.java', 'Example.java', {
+    customLoggers: [{ receiver: 'Audit', tagArgumentIndex: 1, messageArgumentIndex: 2 }]
+  });
+
+  assert.equal(site.api, 'Custom');
+  assert.equal(site.tag, 'AuditDemo');
+  assert.equal(site.level, 'E');
+  assert.equal(site.template.preview, 'audit failed: {value}');
+});

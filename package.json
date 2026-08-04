@@ -2,7 +2,7 @@
   "name": "logcat-source-navigator",
   "displayName": "Logcat Source Navigator",
   "description": "Map Android logcat rows to Log, Slog, and ALOG source locations.",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "publisher": "local",
   "license": "MIT",
   "repository": {
@@ -131,6 +131,35 @@
           "default": 2048,
           "minimum": 64,
           "description": "Skip source files larger than this limit during indexing."
+        },
+        "logcatSourceNavigator.customLoggers": {
+          "type": "array",
+          "scope": "resource",
+          "default": [],
+          "items": {
+            "type": "object",
+            "required": [
+              "receiver"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "receiver": {
+                "type": "string",
+                "description": "Java/Kotlin receiver to recognize, for example L or com.example.Trace."
+              },
+              "tagArgumentIndex": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Zero-based tag argument index. Set together with messageArgumentIndex for non-standard wrapper signatures."
+              },
+              "messageArgumentIndex": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Zero-based message argument index."
+              }
+            }
+          },
+          "description": "Additional Java/Kotlin logging facades to index. Example: [{ \"receiver\": \"L\" }] recognizes L.e(message) and L.e(TAG, message)."
         }
       }
     }

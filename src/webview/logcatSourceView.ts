@@ -49,7 +49,9 @@ export type PanelMessage =
   | { type: 'ready' }
   | { type: 'indexSources' }
   | { type: 'loadLogcat' }
+  | { type: 'loadLogcatUri'; uri: string }
   | { type: 'loadLogcatText'; name: string; text: string }
+  | { type: 'loadLogcatError'; message: string }
   | { type: 'clearSession' }
   | { type: 'filter'; filters: PanelFilters }
   | { type: 'select'; id: string }
@@ -138,7 +140,6 @@ function getHtml(webview: vscode.Webview): string {
     .candidate:first-of-type { border-top: 0; }
     .candidate-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .empty { justify-content: center; min-height: 100px; color: var(--vscode-descriptionForeground); text-align: center; }
-    #file-input { display: none; }
     @media (max-width: 760px) {
       .row { grid-template-columns: minmax(120px, 1fr) 24px minmax(120px, 1fr); }
       .row .pid, .row .tag, .row .status { display: none; }
@@ -154,14 +155,13 @@ function getHtml(webview: vscode.Webview): string {
       </div>
       <div class="toolbar-actions">
         <button id="index-button" class="secondary" type="button">Index Source Folder</button>
-        <button id="load-button" type="button">Load Logcat</button>
+        <button id="load-button" type="button">Attach Logcat / .log</button>
         <button id="clear-button" class="secondary" type="button">Clear</button>
       </div>
     </div>
 
-    <input id="file-input" type="file" accept=".log,.logcat,.txt,.json,text/plain,application/json" />
     <div id="drop-zone" class="drop-zone" role="button" tabindex="0">
-      Drop a logcat file here, or choose Load Logcat. Supports adb text logs and Android Studio JSON exports.
+      Drop a .log, .logcat, .txt, or .json file here. If drop is blocked by VS Code, click Attach Logcat / .log.
     </div>
 
     <section id="filters" class="filters" aria-label="Log filters"></section>
@@ -304,22 +304,99 @@ function getHtml(webview: vscode.Webview): string {
       }
       if (restoreLogFocus) byId('log-list').focus();
     }
+    function reportDroppedLogcatError(message) {
+      post('loadLogcatError', { message });
+    }
     function loadFile(file) {
-      if (!file) return;
+      if (!file) {
+        reportDroppedLogcatError('No file was included in the drop.');
+        return;
+      }
       const reader = new FileReader();
-      reader.onload = () => post('loadLogcatText', { name: file.name, text: String(reader.result || '') });
-      reader.readAsText(file);
+      reader.onload = () => {
+        if (typeof reader.result !== 'string') {
+          reportDroppedLogcatError('The dropped file could not be read as text.');
+          return;
+        }
+        post('loadLogcatText', { name: file.name || 'dropped-logcat.log', text: reader.result });
+      };
+      reader.onerror = () => reportDroppedLogcatError(reader.error ? reader.error.message : 'The dropped file could not be read.');
+      reader.onabort = () => reportDroppedLogcatError('Reading the dropped file was cancelled.');
+      try {
+        reader.readAsText(file);
+      } catch (error) {
+        reportDroppedLogcatError(error instanceof Error ? error.message : String(error));
+      }
+    }
+    function firstDroppedFile(dataTransfer) {
+      if (!dataTransfer) return undefined;
+      if (dataTransfer.files && dataTransfer.files.length) return dataTransfer.files[0];
+      if (dataTransfer.items) {
+        for (const item of dataTransfer.items) {
+          if (item.kind === 'file') {
+            const file = item.getAsFile();
+            if (file) return file;
+          }
+        }
+      }
+      return undefined;
+    }
+    function droppedUri(dataTransfer) {
+      if (!dataTransfer) return undefined;
+      const uriList = dataTransfer.getData('text/uri-list') || '';
+      return uriList.split(/\\r?\\n/)
+        .map((value) => value.trim())
+        .find((value) => value && !value.startsWith('#') && /^(file|vscode-remote):/i.test(value));
+    }
+    function loadDroppedData(dataTransfer) {
+      const file = firstDroppedFile(dataTransfer);
+      if (file) {
+        loadFile(file);
+        return;
+      }
+      const uri = droppedUri(dataTransfer);
+      if (uri) {
+        post('loadLogcatUri', { uri });
+        return;
+      }
+      reportDroppedLogcatError('VS Code did not provide an accessible file. Use Attach Logcat / .log to choose the file.');
     }
     byId('index-button').addEventListener('click', () => post('indexSources'));
-    byId('load-button').addEventListener('click', () => byId('file-input').click());
+    byId('load-button').addEventListener('click', () => post('loadLogcat'));
     byId('clear-button').addEventListener('click', () => post('clearSession'));
-    byId('file-input').addEventListener('change', (event) => loadFile(event.target.files && event.target.files[0]));
     const dropZone = byId('drop-zone');
-    dropZone.addEventListener('dragover', (event) => { event.preventDefault(); dropZone.classList.add('is-over'); });
-    dropZone.addEventListener('dragleave', () => dropZone.classList.remove('is-over'));
-    dropZone.addEventListener('drop', (event) => { event.preventDefault(); dropZone.classList.remove('is-over'); loadFile(event.dataTransfer.files && event.dataTransfer.files[0]); });
-    dropZone.addEventListener('click', () => byId('file-input').click());
-    dropZone.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') byId('file-input').click(); });
+    let dragDepth = 0;
+    dropZone.addEventListener('dragenter', (event) => {
+      event.preventDefault();
+      dragDepth += 1;
+      dropZone.classList.add('is-over');
+    });
+    dropZone.addEventListener('dragover', (event) => {
+      event.preventDefault();
+      dropZone.classList.add('is-over');
+    });
+    dropZone.addEventListener('dragleave', (event) => {
+      event.preventDefault();
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (!dragDepth) dropZone.classList.remove('is-over');
+    });
+    dropZone.addEventListener('drop', (event) => {
+      event.preventDefault();
+      dragDepth = 0;
+      dropZone.classList.remove('is-over');
+      loadDroppedData(event.dataTransfer);
+    });
+    dropZone.addEventListener('dragend', () => {
+      dragDepth = 0;
+      dropZone.classList.remove('is-over');
+    });
+    dropZone.addEventListener('click', () => post('loadLogcat'));
+    dropZone.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        post('loadLogcat');
+      }
+    });
     byId('log-list').addEventListener('keydown', (event) => {
       if (!state || !state.rows.length) return;
       if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {

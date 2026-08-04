@@ -1,7 +1,11 @@
 import { LogLevel, LogcatEvent } from './types';
 
 const ANSI_ESCAPE = /\u001B\[[0-?]*[ -\/]*[@-~]/g;
-const THREADTIME = /^(?:(\d{2}-\d{2})\s+)?(\d{2}:\d{2}:\d{2}\.\d+)\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+([^:]+):\s?(.*)$/;
+// `adb logcat -v threadtime` normally starts with `MM-DD`, but copied/exported
+// .log files commonly expand it to `YYYY-MM-DD`.  Some tools also use `T` as
+// the date/time separator.  Keep the capture layout stable because the parser
+// below intentionally treats both variants the same way.
+const THREADTIME = /^\s*(?:(\d{4}-\d{2}-\d{2}|\d{2}-\d{2})(?:\s+|T))?(\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?)\s+(\d+)\s+(\d+)\s+([VDIWEF])\s+([^:]+):\s?(.*)$/;
 const BRIEF = /^([VDIWEF])\/([^\s(]+)\s*\(\s*(\d+)\):\s?(.*)$/;
 
 type JsonRecord = Record<string, unknown>;
@@ -132,13 +136,16 @@ function parseAndroidStudioJson(text: string): LogcatEvent[] | undefined {
 
 /** Parses Android Studio JSON exports, `adb logcat -v threadtime`, and brief logcat format. */
 export function parseLogcat(text: string): LogcatEvent[] {
-  const androidStudioEvents = parseAndroidStudioJson(text);
+  // A UTF-8 BOM is fairly common in text exports saved by Windows tools.  It
+  // must be removed before matching the first threadtime line.
+  const normalizedText = text.replace(/^\uFEFF/, '');
+  const androidStudioEvents = parseAndroidStudioJson(normalizedText);
   if (androidStudioEvents) {
     return androidStudioEvents;
   }
 
   const events: LogcatEvent[] = [];
-  const lines = text.split(/\n/);
+  const lines = normalizedText.split(/\n/);
   let eventNumber = 0;
 
   for (let index = 0; index < lines.length; index += 1) {

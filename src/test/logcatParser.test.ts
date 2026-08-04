@@ -22,6 +22,22 @@ test('parses threadtime and brief logcat formats and groups continuation lines',
   assert.deepEqual(availablePids(events), [99, 1048]);
 });
 
+test('parses full-date threadtime lines from text .log exports', () => {
+  const logcat = [
+    '\uFEFF2026-08-03 22:13:50.123  22745  16864 W DemoService: connect failed: timeout',
+    '2026-08-03T22:13:51.456  22745  16864 E DemoService: retry exhausted'
+  ].join('\n');
+
+  const events = parseLogcat(logcat);
+  assert.equal(events.length, 2);
+  assert.equal(events[0].timestamp, '2026-08-03 22:13:50.123');
+  assert.equal(events[0].pid, 22745);
+  assert.equal(events[0].tid, 16864);
+  assert.equal(events[1].timestamp, '2026-08-03 22:13:51.456');
+  assert.equal(events[1].level, 'E');
+  assert.equal(events[1].message, 'retry exhausted');
+});
+
 test('parses Android Studio JSON logcat exports', () => {
   const exported = JSON.stringify({
     metadata: { device: { physicalDevice: { model: 'SM-G986N' } } },
